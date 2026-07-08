@@ -14,7 +14,7 @@ def parse_args():
 
 	p.add_argument(
 		"--version", "-v",
-		default=json.load(urllib.request.urlopen("https://api.github.com/repos/moghtech/komodo/releases/latest"))["tag_name"],
+		default=json.load(urllib.request.urlopen("https://api.github.com/repos/intezya/komodo/releases/latest"))["tag_name"],
 		help="Install a specific version, like 'v2.0.0'"
 	)
 
@@ -26,7 +26,7 @@ def parse_args():
 
 	p.add_argument(
 		"--binary-url",
-		default="https://github.com/moghtech/komodo/releases/download",
+		default="https://github.com/intezya/komodo/releases/download",
 		help="Use alternate binary source"
 	)
 
@@ -63,7 +63,7 @@ def download_binary(args, bin_dir):
 			f"Failed to download binary from "
 			f"{args.binary_url}/{args.version}/{km_bin}"
 			f"\n\nDid you provide a valid tag for '--version'? Check here for valid version tags:"
-			f"\nhttps://github.com/moghtech/komodo/tags"
+			f"\nhttps://github.com/intezya/komodo/tags"
 		)
 
 	# add executable permissions

@@ -1,0 +1,106 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_OWNER: intezya
+  REPOSITORY: intezya/komodo
+
+jobs:
+  release:
+    name: Build and publish release
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set release version
+        run: echo "VERSION=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build linux/amd64 binaries
+        run: |
+          docker buildx build \
+            --platform linux/amd64 \
+            --output type=local,dest=dist/linux-amd64 \
+            -f bin/binaries.Dockerfile .
+
+      - name: Build linux/arm64 binaries
+        run: |
+          docker buildx build \
+            --platform linux/arm64 \
+            --output type=local,dest=dist/linux-arm64 \
+            -f bin/binaries.Dockerfile .
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p dist/assets
+          cp dist/linux-amd64/km dist/assets/km-x86_64
+          cp dist/linux-amd64/periphery dist/assets/periphery-x86_64
+          cp dist/linux-amd64/core dist/assets/core-x86_64
+          cp dist/linux-arm64/km dist/assets/km-aarch64
+          cp dist/linux-arm64/periphery dist/assets/periphery-aarch64
+          cp dist/linux-arm64/core dist/assets/core-aarch64
+          chmod +x dist/assets/*
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$VERSION" dist/assets/* \
+            --repo "$REPOSITORY" \
+            --title "$VERSION" \
+            --notes "Intezya Komodo release $VERSION"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Publish core image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: bin/core/aio.Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/intezya/komodo-core:${{ github.ref_name }}
+            ghcr.io/intezya/komodo-core:2
+
+      - name: Publish periphery image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: bin/periphery/aio.Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/intezya/komodo-periphery:${{ github.ref_name }}
+            ghcr.io/intezya/komodo-periphery:2
+
+      - name: Publish cli image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: bin/cli/aio.Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/intezya/komodo-cli:${{ github.ref_name }}
+            ghcr.io/intezya/komodo-cli:2

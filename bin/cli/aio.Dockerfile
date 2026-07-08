@@ -20,6 +20,6 @@ ENV KOMODO_CLI_CONFIG_PATHS="/config"
 
 CMD [ "km" ]
 
-LABEL org.opencontainers.image.source="https://github.com/moghtech/komodo"
+LABEL org.opencontainers.image.source="https://github.com/intezya/komodo"
 LABEL org.opencontainers.image.description="Komodo CLI"
 LABEL org.opencontainers.image.licenses="GPL-3.0"

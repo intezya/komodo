@@ -28,6 +28,6 @@ COPY --from=builder /builder/target/release/core /core
 COPY --from=builder /builder/target/release/periphery /periphery
 COPY --from=builder /builder/target/release/km /km
 
-LABEL org.opencontainers.image.source="https://github.com/moghtech/komodo"
+LABEL org.opencontainers.image.source="https://github.com/intezya/komodo"
 LABEL org.opencontainers.image.description="Komodo Binaries"
 LABEL org.opencontainers.image.licenses="GPL-3.0"

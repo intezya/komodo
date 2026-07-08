@@ -41,7 +41,7 @@ services:
       FERRETDB_POSTGRESQL_URL: postgres://${KOMODO_DATABASE_USERNAME}:${KOMODO_DATABASE_PASSWORD}@postgres:5432/postgres
   
   core:
-    image: ghcr.io/moghtech/komodo-core:${COMPOSE_KOMODO_IMAGE_TAG:-2}
+    image: ghcr.io/intezya/komodo-core:${COMPOSE_KOMODO_IMAGE_TAG:-2}
     init: true
     restart: unless-stopped
     depends_on:
@@ -65,9 +65,9 @@ services:
 
   ## Deploy Periphery container using this block,
   ## or deploy the Periphery binary with systemd using 
-  ## https://github.com/moghtech/komodo/tree/main/scripts
+  ## https://github.com/intezya/komodo/tree/main/scripts
   periphery:
-    image: ghcr.io/moghtech/komodo-periphery:${COMPOSE_KOMODO_IMAGE_TAG:-2}
+    image: ghcr.io/intezya/komodo-periphery:${COMPOSE_KOMODO_IMAGE_TAG:-2}
     init: true
     restart: unless-stopped
     depends_on:
@@ -83,7 +83,7 @@ services:
       ## Specify the Periphery agent root directory.
       ## All your configs / repos must be children of this directory for Periphery to be able to see it.
       ## Must be the same inside and outside the container,
-      ## or docker will get confused. See https://github.com/moghtech/komodo/discussions/180.
+      ## or docker will get confused. See https://github.com/intezya/komodo/discussions/180.
       ## Default: /etc/komodo.
       - ${PERIPHERY_ROOT_DIRECTORY:-/etc/komodo}:${PERIPHERY_ROOT_DIRECTORY:-/etc/komodo}
       ## Optionally mount a custom periphery.config.toml

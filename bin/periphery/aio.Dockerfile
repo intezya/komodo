@@ -39,6 +39,6 @@ CMD [ "periphery" ]
 # Label to prevent Komodo from stopping with StopAllContainers
 LABEL komodo.skip="true"
 # Label for ghcr
-LABEL org.opencontainers.image.source="https://github.com/moghtech/komodo"
+LABEL org.opencontainers.image.source="https://github.com/intezya/komodo"
 LABEL org.opencontainers.image.description="Komodo Periphery"
 LABEL org.opencontainers.image.licenses="GPL-3.0"
