@@ -177,6 +177,16 @@ pub fn get_stack_state_from_containers(
   if restarting {
     return StackState::Restarting;
   }
+  let running_with_successful_exits =
+    containers.iter().any(|container| {
+      container.state == ContainerStateStatusEnum::Running
+    }) && containers.iter().all(|container| {
+      container.state == ContainerStateStatusEnum::Running
+        || is_successfully_exited_container(container)
+    });
+  if running_with_successful_exits {
+    return StackState::Running;
+  }
   let dead = containers.iter().all(|container| {
     container.state == ContainerStateStatusEnum::Dead
   });
@@ -190,6 +200,30 @@ pub fn get_stack_state_from_containers(
     return StackState::Removing;
   }
   StackState::Unhealthy
+}
+
+fn is_successfully_exited_container(
+  container: &ContainerListItem,
+) -> bool {
+  container.state == ContainerStateStatusEnum::Exited
+    && container
+      .status
+      .as_deref()
+      .is_some_and(container_status_is_exit_code_zero)
+}
+
+fn container_status_is_exit_code_zero(status: &str) -> bool {
+  status
+    .strip_prefix("Exited (")
+    .and_then(|status| status.split_once(')'))
+    .and_then(|(code, _)| code.parse::<i64>().ok())
+    .or_else(|| {
+      status
+        .strip_prefix("Exit ")
+        .and_then(|status| status.split_whitespace().next())
+        .and_then(|code| code.parse::<i64>().ok())
+    })
+    == Some(0)
 }
 
 pub async fn get_stack_state(
@@ -588,4 +622,167 @@ pub async fn find_oidc_user(
     })
     .await
     .context("Failed at find user query from database")
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn service(name: &str) -> StackServiceNames {
+    StackServiceNames {
+      service_name: name.to_string(),
+      container_name: name.to_string(),
+      ..Default::default()
+    }
+  }
+
+  fn container(
+    name: &str,
+    state: ContainerStateStatusEnum,
+    status: Option<&str>,
+  ) -> ContainerListItem {
+    ContainerListItem {
+      name: name.to_string(),
+      state,
+      status: status.map(str::to_string),
+      ..Default::default()
+    }
+  }
+
+  #[test]
+  fn stack_state_is_running_when_all_services_are_running() {
+    let services = vec![service("app"), service("worker")];
+    let containers = vec![
+      container("app-1", ContainerStateStatusEnum::Running, None),
+      container("worker-1", ContainerStateStatusEnum::Running, None),
+    ];
+
+    let state =
+      get_stack_state_from_containers(&[], &services, &containers);
+
+    assert_eq!(state, StackState::Running);
+  }
+
+  #[test]
+  fn stack_state_is_stopped_when_all_services_are_exited() {
+    let services = vec![service("app"), service("worker")];
+    let containers = vec![
+      container(
+        "app-1",
+        ContainerStateStatusEnum::Exited,
+        Some("Exited (0) 2 minutes ago"),
+      ),
+      container(
+        "worker-1",
+        ContainerStateStatusEnum::Exited,
+        Some("Exited (1) 2 minutes ago"),
+      ),
+    ];
+
+    let state =
+      get_stack_state_from_containers(&[], &services, &containers);
+
+    assert_eq!(state, StackState::Stopped);
+  }
+
+  #[test]
+  fn stack_state_is_running_with_successfully_exited_services() {
+    let services = vec![service("app"), service("migrate")];
+    let containers = vec![
+      container("app-1", ContainerStateStatusEnum::Running, None),
+      container(
+        "migrate-1",
+        ContainerStateStatusEnum::Exited,
+        Some("Exited (0) 2 minutes ago"),
+      ),
+    ];
+
+    let state =
+      get_stack_state_from_containers(&[], &services, &containers);
+
+    assert_eq!(state, StackState::Running);
+  }
+
+  #[test]
+  fn stack_state_is_unhealthy_with_failed_exited_services() {
+    let services = vec![service("app"), service("migrate")];
+    let containers = vec![
+      container("app-1", ContainerStateStatusEnum::Running, None),
+      container(
+        "migrate-1",
+        ContainerStateStatusEnum::Exited,
+        Some("Exited (1) 2 minutes ago"),
+      ),
+    ];
+
+    let state =
+      get_stack_state_from_containers(&[], &services, &containers);
+
+    assert_eq!(state, StackState::Unhealthy);
+  }
+
+  #[test]
+  fn stack_state_is_unhealthy_with_legacy_failed_exit_status() {
+    let services = vec![service("app"), service("migrate")];
+    let containers = vec![
+      container("app-1", ContainerStateStatusEnum::Running, None),
+      container(
+        "migrate-1",
+        ContainerStateStatusEnum::Exited,
+        Some("Exit 01"),
+      ),
+    ];
+
+    let state =
+      get_stack_state_from_containers(&[], &services, &containers);
+
+    assert_eq!(state, StackState::Unhealthy);
+  }
+
+  #[test]
+  fn stack_state_is_unhealthy_when_exited_status_is_missing() {
+    let services = vec![service("app"), service("migrate")];
+    let containers = vec![
+      container("app-1", ContainerStateStatusEnum::Running, None),
+      container("migrate-1", ContainerStateStatusEnum::Exited, None),
+    ];
+
+    let state =
+      get_stack_state_from_containers(&[], &services, &containers);
+
+    assert_eq!(state, StackState::Unhealthy);
+  }
+
+  #[test]
+  fn stack_state_is_unhealthy_with_running_and_restarting_services() {
+    let services = vec![service("app"), service("worker")];
+    let containers = vec![
+      container("app-1", ContainerStateStatusEnum::Running, None),
+      container(
+        "worker-1",
+        ContainerStateStatusEnum::Restarting,
+        None,
+      ),
+    ];
+
+    let state =
+      get_stack_state_from_containers(&[], &services, &containers);
+
+    assert_eq!(state, StackState::Unhealthy);
+  }
+
+  #[test]
+  fn stack_state_is_unhealthy_when_expected_service_is_missing() {
+    let services = vec![service("app"), service("worker")];
+    let containers = vec![container(
+      "app-1",
+      ContainerStateStatusEnum::Running,
+      None,
+    )];
+
+    let state =
+      get_stack_state_from_containers(&[], &services, &containers);
+
+    assert_eq!(state, StackState::Unhealthy);
+  }
 }
