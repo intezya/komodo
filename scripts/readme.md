@@ -24,9 +24,9 @@ options:
                         Recreate the systemd service file even if it already exists. (default: None)
   --config-url CONFIG_URL
                         Use a custom config url. (default:
-                        https://raw.githubusercontent.com/moghtech/komodo/refs/heads/main/config/periphery.config.toml)
+                        https://raw.githubusercontent.com/intezya/komodo/refs/heads/main/config/periphery.config.toml)
   --binary-url BINARY_URL
-                        Use alternate binary source (default: https://github.com/moghtech/komodo/releases/download)
+                        Use alternate binary source (default: https://github.com/intezya/komodo/releases/download)
 ```
 
 These scripts will set up Komodo Periphery on your hosts, managed by systemd.
@@ -42,7 +42,7 @@ There's two ways to install periphery: `System` and `User`
 Note. Run this after switching to root user (eg `sudo su -`).
 
 ```sh
-curl -sSL https://raw.githubusercontent.com/moghtech/komodo/main/scripts/setup-periphery.py \
+curl -sSL https://raw.githubusercontent.com/intezya/komodo/main/scripts/setup-periphery.py \
   | python3 - --core-address <YOUR-CORE-ADDRESS> \
   --onboarding-key <YOUR-ONBOARDING-KEY>
 ```
@@ -57,7 +57,7 @@ Will install to paths:
 *Note*. The user running periphery must be a member of the docker group, in order to use the docker cli without sudo.
 
 ```sh
-curl -sSL https://raw.githubusercontent.com/moghtech/komodo/main/scripts/setup-periphery.py \
+curl -sSL https://raw.githubusercontent.com/intezya/komodo/main/scripts/setup-periphery.py \
   | python3 - --user --core-address <YOUR-CORE-ADDRESS> \
   --onboarding-key <YOUR-ONBOARDING-KEY>
 ```
@@ -88,7 +88,7 @@ to the current default.
 Example:
 
 ```sh
-curl -sSL https://raw.githubusercontent.com/moghtech/komodo/main/scripts/setup-periphery.py \
+curl -sSL https://raw.githubusercontent.com/intezya/komodo/main/scripts/setup-periphery.py \
   | python3 - --core-address <YOUR-CORE-ADDRESS> \
   --onboarding-key <YOUR-ONBOARDING-KEY> \
   --force-service-file
