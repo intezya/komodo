@@ -1,4 +1,8 @@
-use std::{io::Error, process::Stdio};
+use std::{
+  io::Error,
+  os::unix::process::ExitStatusExt,
+  process::{ExitStatus, Stdio},
+};
 
 use anyhow::{Context, anyhow};
 use bollard::Docker;
@@ -54,8 +58,10 @@ pub async fn docker_login(
     None => crate::helpers::registry_token(domain, account)?,
   };
 
-  let output =
-    run_docker_login_command(domain, account, registry_token).await;
+  let output = sanitize_docker_login_output(
+    run_docker_login_command(domain, account, registry_token).await,
+    registry_token,
+  );
 
   if output.success() {
     return Ok(true);
@@ -91,6 +97,31 @@ fn docker_login_args(domain: &str, account: &str) -> Vec<String> {
   ]
 }
 
+fn docker_login_error_output(
+  stderr: impl Into<String>,
+) -> CommandOutput {
+  CommandOutput {
+    status: ExitStatus::from_raw(1),
+    stdout: String::new(),
+    stderr: stderr.into(),
+  }
+}
+
+fn sanitize_docker_login_output(
+  output: CommandOutput,
+  registry_token: &str,
+) -> CommandOutput {
+  if registry_token.is_empty() {
+    return output;
+  }
+
+  CommandOutput {
+    stdout: output.stdout.replace(registry_token, "[REDACTED]"),
+    stderr: output.stderr.replace(registry_token, "[REDACTED]"),
+    ..output
+  }
+}
+
 async fn run_docker_login_command(
   domain: &str,
   account: &str,
@@ -105,23 +136,34 @@ async fn run_docker_login_command(
     .spawn()
   {
     Ok(child) => child,
-    Err(error) => return CommandOutput::from_err(error),
+    Err(error) => {
+      return docker_login_error_output(format!(
+        "Failed to start docker login command: {error}"
+      ));
+    }
   };
 
   let Some(mut stdin) = child.stdin.take() else {
-    return CommandOutput::from_err(Error::other(
-      "Failed to open docker login stdin",
-    ));
+    return docker_login_error_output(
+      Error::other("Failed to open docker login stdin").to_string(),
+    );
   };
 
   if let Err(error) = stdin.write_all(registry_token.as_bytes()).await
   {
-    return CommandOutput::from_err(error);
+    return docker_login_error_output(format!(
+      "Failed to write docker login token to stdin: {error}"
+    ));
   }
 
   drop(stdin);
 
-  CommandOutput::from(child.wait_with_output().await)
+  match child.wait_with_output().await {
+    Ok(output) => CommandOutput::from(Ok(output)),
+    Err(error) => docker_login_error_output(format!(
+      "Failed to wait for docker login command: {error}"
+    )),
+  }
 }
 
 #[instrument("PullImage")]
@@ -533,7 +575,92 @@ fn convert_tls_info(tls_info: bollard::models::TlsInfo) -> TlsInfo {
 
 #[cfg(test)]
 mod tests {
-  use super::docker_login_args;
+  use std::{
+    env,
+    ffi::OsString,
+    fs,
+    os::unix::fs::PermissionsExt,
+    path::PathBuf,
+    sync::{Mutex, OnceLock},
+    time::{SystemTime, UNIX_EPOCH},
+  };
+
+  use super::{docker_login, docker_login_args};
+
+  fn path_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+  }
+
+  struct PathGuard {
+    original_path: Option<OsString>,
+    temp_dir: PathBuf,
+  }
+
+  impl Drop for PathGuard {
+    fn drop(&mut self) {
+      unsafe {
+        match &self.original_path {
+          Some(path) => env::set_var("PATH", path),
+          None => env::remove_var("PATH"),
+        }
+      }
+      let _ = fs::remove_dir_all(&self.temp_dir);
+    }
+  }
+
+  fn unique_temp_dir(name: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+      .duration_since(UNIX_EPOCH)
+      .unwrap()
+      .as_nanos();
+    env::temp_dir()
+      .join(format!("komodo-{name}-{}-{nanos}", std::process::id()))
+  }
+
+  fn install_fake_docker(script: &str) -> PathGuard {
+    let temp_dir = unique_temp_dir("docker-login-test");
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let docker_path = temp_dir.join("docker");
+    fs::write(&docker_path, script).unwrap();
+
+    let mut permissions =
+      fs::metadata(&docker_path).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&docker_path, permissions).unwrap();
+
+    let original_path = env::var_os("PATH");
+    let mut paths = vec![temp_dir.clone()];
+    if let Some(path) = &original_path {
+      paths.extend(env::split_paths(path));
+    }
+    let new_path = env::join_paths(paths).unwrap();
+
+    unsafe {
+      env::set_var("PATH", &new_path);
+    }
+
+    PathGuard {
+      original_path,
+      temp_dir,
+    }
+  }
+
+  fn install_path_without_docker() -> PathGuard {
+    let temp_dir = unique_temp_dir("docker-login-missing");
+    fs::create_dir_all(&temp_dir).unwrap();
+    let original_path = env::var_os("PATH");
+
+    unsafe {
+      env::set_var("PATH", &temp_dir);
+    }
+
+    PathGuard {
+      original_path,
+      temp_dir,
+    }
+  }
 
   #[test]
   fn docker_login_args_do_not_include_token() {
@@ -542,5 +669,88 @@ mod tests {
 
     assert!(!args.join(" ").contains(token));
     assert!(args.contains(&"--password-stdin".to_string()));
+  }
+
+  #[tokio::test]
+  async fn docker_login_writes_shell_special_token_to_stdin_unchanged()
+   {
+    let _lock = path_lock()
+      .lock()
+      .unwrap_or_else(|poison| poison.into_inner());
+    let temp_dir = unique_temp_dir("docker-login-stdin");
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let stdin_path = temp_dir.join("stdin.txt");
+    let args_path = temp_dir.join("args.txt");
+    let _path_guard = install_fake_docker(&format!(
+      "#!/bin/sh\ncat > \"{}\"\nprintf '%s\\n' \"$@\" > \"{}\"\n",
+      stdin_path.display(),
+      args_path.display()
+    ));
+
+    let token = "pa$$ word 'quoted' \"double\" `backtick`\nline two";
+    let logged_in =
+      docker_login("registry.example.com", "user", Some(token))
+        .await
+        .unwrap();
+
+    assert!(logged_in);
+    assert_eq!(fs::read_to_string(stdin_path).unwrap(), token);
+    assert_eq!(
+      fs::read_to_string(args_path).unwrap(),
+      "login\nregistry.example.com\n--username\nuser\n--password-stdin\n"
+    );
+
+    let _ = fs::remove_dir_all(temp_dir);
+  }
+
+  #[tokio::test]
+  async fn docker_login_error_redacts_token_fragments_from_output() {
+    let _lock = path_lock()
+      .lock()
+      .unwrap_or_else(|poison| poison.into_inner());
+    let _path_guard = install_fake_docker(
+      "#!/bin/sh\ntoken=\"$(cat)\"\nprintf 'docker login failed for %s\\n' \"$token\" >&2\nexit 1\n",
+    );
+
+    let token = "pa$$ word 'quoted' \"double\" `backtick`\nline two";
+    let error =
+      docker_login("registry.example.com", "user", Some(token))
+        .await
+        .unwrap_err();
+    let displayed = format!("{error:#}");
+
+    assert!(
+      displayed.contains("Registry registry.example.com login error")
+    );
+    assert!(!displayed.contains("pa$$ word 'quoted'"));
+    assert!(!displayed.contains("`backtick`"));
+    assert!(!displayed.contains("line two"));
+  }
+
+  #[tokio::test]
+  async fn docker_login_spawn_failures_are_human_readable() {
+    let _lock = path_lock()
+      .lock()
+      .unwrap_or_else(|poison| poison.into_inner());
+    let _path_guard = install_path_without_docker();
+
+    let error = docker_login(
+      "registry.example.com",
+      "user",
+      Some("pa$$ word 'quoted'"),
+    )
+    .await
+    .unwrap_err();
+    let displayed = format!("{error:#}");
+
+    assert!(
+      displayed.contains("Registry registry.example.com login error")
+    );
+    assert!(
+      displayed.contains("Failed to start docker login command")
+    );
+    assert!(!displayed.contains("Os {"));
+    assert!(!displayed.contains("pa$$ word 'quoted'"));
   }
 }
