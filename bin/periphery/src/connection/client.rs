@@ -24,6 +24,107 @@ use crate::{
   state::{core_connections, periphery_keys},
 };
 
+const RETRY_LOG_EVERY: usize = 10;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutboundFailurePhase {
+  Connect,
+  OnboardingFlow,
+  Handshake,
+  Login,
+  Onboarding,
+}
+
+impl OutboundFailurePhase {
+  fn as_str(self) -> &'static str {
+    match self {
+      OutboundFailurePhase::Connect => "connect",
+      OutboundFailurePhase::OnboardingFlow => "onboarding_flow",
+      OutboundFailurePhase::Handshake => "handshake",
+      OutboundFailurePhase::Login => "login",
+      OutboundFailurePhase::Onboarding => "onboarding",
+    }
+  }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutboundRetryLogDecision {
+  FirstFailure,
+  StillFailing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OutboundRetryEvent {
+  phase: OutboundFailurePhase,
+  attempt: usize,
+  log_decision: Option<OutboundRetryLogDecision>,
+}
+
+#[derive(Default)]
+struct OutboundRetryTracker {
+  phase: Option<OutboundFailurePhase>,
+  attempt: usize,
+}
+
+impl OutboundRetryTracker {
+  fn record_failure(
+    &mut self,
+    phase: OutboundFailurePhase,
+    error: &anyhow::Error,
+  ) -> OutboundRetryEvent {
+    if self.phase == Some(phase) {
+      self.attempt += 1;
+    } else {
+      self.phase = Some(phase);
+      self.attempt = 1;
+    }
+
+    let log_decision = if self.attempt == 1 {
+      warn!(
+        phase = phase.as_str(),
+        attempt = self.attempt,
+        error = ?error,
+        "Outbound reconnect failed"
+      );
+      Some(OutboundRetryLogDecision::FirstFailure)
+    } else if self.attempt % RETRY_LOG_EVERY == 0 {
+      warn!(
+        phase = phase.as_str(),
+        attempts = self.attempt,
+        last_error = ?error,
+        "Outbound reconnect still failing"
+      );
+      Some(OutboundRetryLogDecision::StillFailing)
+    } else {
+      None
+    };
+
+    OutboundRetryEvent {
+      phase,
+      attempt: self.attempt,
+      log_decision,
+    }
+  }
+
+  fn reset(&mut self) {
+    self.phase = None;
+    self.attempt = 0;
+  }
+}
+
+fn classify_login_failure_phase(
+  error: &anyhow::Error,
+) -> OutboundFailurePhase {
+  if error.chain().any(|cause| {
+    let cause = cause.to_string().to_ascii_lowercase();
+    cause.contains("handshake") || cause.contains("nonce")
+  }) {
+    OutboundFailurePhase::Handshake
+  } else {
+    OutboundFailurePhase::Login
+  }
+}
+
 #[instrument("StartCoreConnection")]
 pub async fn handler(
   address: &str,
@@ -37,29 +138,20 @@ pub async fn handler(
 
   info!("Initiating outbound connection to {endpoint}");
 
-  let mut already_logged_connection_error = false;
-  let mut already_logged_login_error = false;
-  let mut already_logged_onboarding_error = false;
-
   let core = identifiers.host().to_string();
 
   let channel = core_connections().get_or_insert_default(&core).await;
 
   let handle = tokio::spawn(async move {
+    let mut retry_tracker = OutboundRetryTracker::default();
     let mut receiver = channel.receiver()?;
     loop {
       let (mut socket, accept) =
         match connect_websocket(&endpoint).await {
           Ok(res) => res,
           Err(e) => {
-            if !already_logged_connection_error {
-              warn!("{e:#}");
-              already_logged_connection_error = true;
-              // If error transitions from login to connection,
-              // set to false to see login error after reconnect.
-              already_logged_login_error = false;
-              already_logged_onboarding_error = false;
-            }
+            retry_tracker
+              .record_failure(OutboundFailurePhase::Connect, &e);
             tokio::time::sleep(Duration::from_secs(
               CONNECTION_RETRY_SECONDS,
             ))
@@ -76,14 +168,8 @@ pub async fn handler(
       {
         Ok(onboarding_flow) => onboarding_flow,
         Err(e) => {
-          if !already_logged_connection_error {
-            warn!("{e:#}");
-            already_logged_connection_error = true;
-            // If error transitions from login to connection,
-            // set to false to see login error after reconnect.
-            already_logged_login_error = false;
-            already_logged_onboarding_error = false;
-          }
+          retry_tracker
+            .record_failure(OutboundFailurePhase::OnboardingFlow, &e);
           tokio::time::sleep(Duration::from_secs(
             CONNECTION_RETRY_SECONDS,
           ))
@@ -91,8 +177,6 @@ pub async fn handler(
           continue;
         }
       };
-
-      already_logged_connection_error = false;
 
       debug!(
         host = identifiers.host(),
@@ -110,16 +194,15 @@ pub async fn handler(
         } else {
           Err(anyhow!("Server '{}' does not exist or is misconfigured, and no PERIPHERY_ONBOARDING_KEY is provided.", config.connect_as))
         }) {
-          if !already_logged_onboarding_error {
-            error!("{e:#}");
-            already_logged_onboarding_error = true;
-          }
+          retry_tracker
+            .record_failure(OutboundFailurePhase::Onboarding, &e);
           tokio::time::sleep(Duration::from_secs(
             CONNECTION_RETRY_SECONDS,
           ))
           .await;
           continue;
         };
+        retry_tracker.reset();
       } else {
         let span = info_span!(
           "CoreLogin",
@@ -146,10 +229,8 @@ pub async fn handler(
             // Onboarding key available but failed.
             Err(e) => e,
           };
-          if !already_logged_login_error {
-            warn!("Failed to login | {e:#}");
-            already_logged_login_error = true;
-          }
+          retry_tracker
+            .record_failure(classify_login_failure_phase(&e), &e);
           tokio::time::sleep(Duration::from_secs(
             CONNECTION_RETRY_SECONDS,
           ))
@@ -157,7 +238,7 @@ pub async fn handler(
           continue;
         }
 
-        already_logged_login_error = false;
+        retry_tracker.reset();
 
         super::handle_socket(
           socket,
@@ -228,4 +309,51 @@ async fn connect_websocket(
       StatusCode::UNAUTHORIZED => anyhow!("401 Unauthorized: Only one Server connected as '{}' is allowed. Or the Core reverse proxy needs to forward host and websocket headers.", config.connect_as),
       _ => e.error,
     })
+}
+
+#[cfg(test)]
+mod tests {
+  use super::{
+    OutboundFailurePhase, OutboundRetryLogDecision,
+    OutboundRetryTracker, classify_login_failure_phase,
+  };
+
+  #[test]
+  fn outbound_reconnect_keeps_retrying_after_login_timeout() {
+    let mut tracker = OutboundRetryTracker::default();
+    let timeout = anyhow::anyhow!("Timed out waiting for message.")
+      .context("[Client] Failed to get handshake_m2");
+
+    let first = tracker.record_failure(
+      classify_login_failure_phase(&timeout),
+      &timeout,
+    );
+    assert_eq!(first.phase, OutboundFailurePhase::Handshake);
+    assert_eq!(first.attempt, 1);
+    assert!(matches!(
+      first.log_decision,
+      Some(OutboundRetryLogDecision::FirstFailure)
+    ));
+
+    let second = tracker.record_failure(
+      classify_login_failure_phase(&timeout),
+      &timeout,
+    );
+    assert_eq!(second.phase, OutboundFailurePhase::Handshake);
+    assert_eq!(second.attempt, 2);
+    assert!(second.log_decision.is_none());
+
+    tracker.reset();
+
+    let next = tracker.record_failure(
+      classify_login_failure_phase(&timeout),
+      &timeout,
+    );
+    assert_eq!(next.phase, OutboundFailurePhase::Handshake);
+    assert_eq!(next.attempt, 1);
+    assert!(matches!(
+      next.log_decision,
+      Some(OutboundRetryLogDecision::FirstFailure)
+    ));
+  }
 }

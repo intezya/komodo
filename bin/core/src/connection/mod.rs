@@ -1,12 +1,12 @@
 use std::{
   sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{self, AtomicBool},
   },
-  time::Duration,
+  time::{Duration, Instant},
 };
 
-use anyhow::anyhow;
+use anyhow::{Context as _, anyhow};
 use database::mungos::{by_id::update_one_by_id, mongodb::bson::doc};
 use encoding::{
   CastBytes as _, Decode as _, EncodedJsonMessage, EncodedResponse,
@@ -31,7 +31,7 @@ use transport::{
   },
   channel::{BufferedReceiver, Sender, buffered_channel},
   websocket::{
-    Websocket, WebsocketReceiver as _, WebsocketReceiverExt,
+    Websocket, WebsocketMessage, WebsocketReceiver as _,
     WebsocketSender as _,
   },
 };
@@ -44,6 +44,9 @@ use crate::{
 
 pub mod client;
 pub mod server;
+
+pub(crate) const DUPLICATE_CONNECTION_STALE_AFTER: Duration =
+  Duration::from_secs(12);
 
 #[derive(Default)]
 pub struct PeripheryConnections(
@@ -270,6 +273,8 @@ pub struct PeripheryConnection {
   pub cancel: CancellationToken,
   /// Whether Periphery is currently connected.
   pub connected: AtomicBool,
+  /// Last observed read-side activity from Periphery.
+  pub last_activity: Mutex<Instant>,
   // These fields must be maintained if new connection replaces old
   // at the same server id.
   /// Stores latest connection error
@@ -294,6 +299,7 @@ impl PeripheryConnection {
         args: args.into(),
         cancel: CancellationToken::new(),
         connected: AtomicBool::new(false),
+        last_activity: Mutex::new(Instant::now()),
         error: Default::default(),
         responses: Default::default(),
         terminals: Default::default(),
@@ -319,6 +325,7 @@ impl PeripheryConnection {
         args: args.into(),
         cancel: CancellationToken::new(),
         connected: AtomicBool::new(false),
+        last_activity: Mutex::new(Instant::now()),
         error: self.error.clone(),
         responses: self.responses.clone(),
         terminals: self.terminals.clone(),
@@ -401,9 +408,41 @@ impl PeripheryConnection {
 
     let handle_reads = async {
       loop {
-        match ws_read.recv_message().await {
-          Ok(message) => self.handle_incoming_message(message).await,
+        match tokio::time::timeout(
+          Duration::from_secs(10),
+          ws_read.recv(),
+        )
+        .await
+        .context("Timed out waiting for Ping")
+        {
+          Ok(Ok(WebsocketMessage::Message(message))) => {
+            self.mark_activity();
+            match message.decode() {
+              Ok(message) => {
+                self.handle_incoming_message(message).await
+              }
+              Err(e) => {
+                self.set_error(e).await;
+                break;
+              }
+            }
+          }
+          Ok(Ok(WebsocketMessage::Ping)) => self.mark_activity(),
+          Ok(Ok(WebsocketMessage::Close)) => {
+            self.set_error(anyhow!("Connection closed")).await;
+            break;
+          }
+          Ok(Ok(WebsocketMessage::Closed)) => {
+            self
+              .set_error(anyhow!("Connection already closed"))
+              .await;
+            break;
+          }
           Err(e) => {
+            self.set_error(e).await;
+            break;
+          }
+          Ok(Err(e)) => {
             self.set_error(e).await;
             break;
           }
@@ -476,10 +515,23 @@ impl PeripheryConnection {
 
   pub fn set_connected(&self, connected: bool) {
     self.connected.store(connected, atomic::Ordering::Relaxed);
+    if connected {
+      self.mark_activity();
+    }
   }
 
   pub fn connected(&self) -> bool {
     self.connected.load(atomic::Ordering::Relaxed)
+  }
+
+  pub fn mark_activity(&self) {
+    *self.last_activity.lock().unwrap() = Instant::now();
+  }
+
+  pub fn should_reject_duplicate_connection(&self) -> bool {
+    self.connected()
+      && self.last_activity.lock().unwrap().elapsed()
+        <= DUPLICATE_CONNECTION_STALE_AFTER
   }
 
   /// Polls connected 3 times (500ms in between) before bailing.
@@ -544,4 +596,34 @@ fn spawn_update_attempted_public_key(
       );
     };
   });
+}
+
+#[cfg(test)]
+mod tests {
+  use std::time::{Duration, Instant};
+
+  use super::{
+    DUPLICATE_CONNECTION_STALE_AFTER, PeripheryConnection,
+    PeripheryConnectionArgs,
+  };
+
+  #[test]
+  fn duplicate_reconnect_rejects_only_recently_active_connections() {
+    let (connection, _receiver) =
+      PeripheryConnection::new(PeripheryConnectionArgs {
+        id: "server-1",
+        address: None,
+        periphery_public_key: None,
+        passkey: None,
+      });
+
+    connection.set_connected(true);
+    assert!(connection.should_reject_duplicate_connection());
+
+    *connection.last_activity.lock().unwrap() = Instant::now()
+      - DUPLICATE_CONNECTION_STALE_AFTER
+      - Duration::from_secs(1);
+
+    assert!(!connection.should_reject_duplicate_connection());
+  }
 }

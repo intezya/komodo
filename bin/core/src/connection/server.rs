@@ -76,9 +76,9 @@ pub async fn handler(
     Some(server) => {
       let connections = periphery_connections();
 
-      // Ensure connected server can't get bumped off the connection.
+      // Reject healthy duplicates, but let stale entries be replaced.
       if let Some(existing_connection) = connections.get(&server.id).await
-        && existing_connection.connected()
+        && existing_connection.should_reject_duplicate_connection()
       {
         return Err(
           anyhow!("A Server '{server_query}' is already connected")
