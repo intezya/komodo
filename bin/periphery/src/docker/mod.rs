@@ -1,11 +1,14 @@
+use std::{io::Error, process::Stdio};
+
 use anyhow::{Context, anyhow};
 use bollard::Docker;
-use command::{run_komodo_standard_command, run_shell_command};
+use command::{CommandOutput, run_komodo_standard_command};
 use komodo_client::entities::{
   TerminationSignal,
   docker::{task::*, *},
   update::Log,
 };
+use tokio::{io::AsyncWriteExt, process::Command};
 
 pub mod compose;
 pub mod config;
@@ -51,27 +54,74 @@ pub async fn docker_login(
     None => crate::helpers::registry_token(domain, account)?,
   };
 
-  let log = run_shell_command(&format!(
-    "echo {registry_token} | docker login {domain} --username '{account}' --password-stdin",
-  ), None)
-  .await;
+  let output =
+    run_docker_login_command(domain, account, registry_token).await;
 
-  if log.success() {
+  if output.success() {
     return Ok(true);
   }
 
   let mut e = anyhow!("End of trace");
-  for line in
-    log.stderr.split('\n').filter(|line| !line.is_empty()).rev()
+  for line in output
+    .stderr
+    .split('\n')
+    .filter(|line| !line.is_empty())
+    .rev()
   {
     e = e.context(line.to_string());
   }
-  for line in
-    log.stdout.split('\n').filter(|line| !line.is_empty()).rev()
+  for line in output
+    .stdout
+    .split('\n')
+    .filter(|line| !line.is_empty())
+    .rev()
   {
     e = e.context(line.to_string());
   }
   Err(e.context(format!("Registry {domain} login error")))
+}
+
+fn docker_login_args(domain: &str, account: &str) -> Vec<String> {
+  vec![
+    "login".into(),
+    domain.into(),
+    "--username".into(),
+    account.into(),
+    "--password-stdin".into(),
+  ]
+}
+
+async fn run_docker_login_command(
+  domain: &str,
+  account: &str,
+  registry_token: &str,
+) -> CommandOutput {
+  let mut child = match Command::new("docker")
+    .args(docker_login_args(domain, account))
+    .kill_on_drop(true)
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+  {
+    Ok(child) => child,
+    Err(error) => return CommandOutput::from_err(error),
+  };
+
+  let Some(mut stdin) = child.stdin.take() else {
+    return CommandOutput::from_err(Error::other(
+      "Failed to open docker login stdin",
+    ));
+  };
+
+  if let Err(error) = stdin.write_all(registry_token.as_bytes()).await
+  {
+    return CommandOutput::from_err(error);
+  }
+
+  drop(stdin);
+
+  CommandOutput::from(child.wait_with_output().await)
 }
 
 #[instrument("PullImage")]
@@ -478,5 +528,19 @@ fn convert_tls_info(tls_info: bollard::models::TlsInfo) -> TlsInfo {
     trust_root: tls_info.trust_root,
     cert_issuer_subject: tls_info.cert_issuer_subject,
     cert_issuer_public_key: tls_info.cert_issuer_public_key,
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::docker_login_args;
+
+  #[test]
+  fn docker_login_args_do_not_include_token() {
+    let token = "abc$def' ghi`jkl";
+    let args = docker_login_args("registry.example.com", "user");
+
+    assert!(!args.join(" ").contains(token));
+    assert!(args.contains(&"--password-stdin".to_string()));
   }
 }
