@@ -144,8 +144,10 @@ fn redact_docker_login_token_fragments(
   let mut index = 0;
 
   while index < text_chars.len() {
-    let match_len =
-      longest_token_fragment_match(&text_chars[index..], &token_chars);
+    let match_len = longest_token_fragment_match(
+      &text_chars[index..],
+      &token_chars,
+    );
 
     if match_len >= min_match_len
       || is_delimited_short_token_fragment(
@@ -183,6 +185,53 @@ fn is_delimited_short_token_fragment(
 
   is_non_alphanumeric_boundary(before)
     && is_non_alphanumeric_boundary(after)
+    && has_short_token_fragment_leak_context(text, start)
+}
+
+fn has_short_token_fragment_leak_context(
+  text: &[char],
+  start: usize,
+) -> bool {
+  let line_start = text[..start]
+    .iter()
+    .rposition(|character| *character == '\n')
+    .map(|index| index + 1)
+    .unwrap_or(0);
+  let context = text[line_start..start]
+    .iter()
+    .collect::<String>()
+    .to_lowercase();
+
+  let context =
+    context.trim_end_matches(is_short_fragment_separator_padding);
+  let Some(separator_index) =
+    context.rfind(|character| character == ':' || character == '=')
+  else {
+    return false;
+  };
+
+  let (label, separator_padding) = context.split_at(separator_index);
+  separator_padding
+    .chars()
+    .skip(1)
+    .all(is_short_fragment_separator_padding)
+    && label
+      .split(|character: char| !character.is_alphanumeric())
+      .any(is_short_fragment_leak_context_word)
+}
+
+fn is_short_fragment_separator_padding(character: char) -> bool {
+  character.is_whitespace()
+    || character == '\''
+    || character == '"'
+    || character == '`'
+}
+
+fn is_short_fragment_leak_context_word(word: &str) -> bool {
+  matches!(
+    word,
+    "credential" | "credentials" | "password" | "secret" | "token"
+  )
 }
 
 fn is_non_alphanumeric_boundary(character: Option<char>) -> bool {
@@ -765,15 +814,42 @@ mod tests {
   }
 
   #[test]
-  fn docker_login_output_redacts_delimited_short_token_fragments() {
+  fn docker_login_output_redacts_delimited_short_token_fragments_in_leak_context()
+   {
     let redacted = redact_docker_login_token_fragments(
-      "single:a\npair:bc\ntriple:123\nquoted:\"XY\"\nword:stacktrace\n",
+      "token fragment:a\nsecret suffix:bc\npassword prefix:123\ncredential fragment:\"XY\"\nword:stacktrace\n",
       "abc123XYZ",
     );
 
     assert_eq!(
       redacted,
-      "single:[REDACTED]\npair:[REDACTED]\ntriple:[REDACTED]\nquoted:\"[REDACTED]\"\nword:stacktrace\n"
+      "token fragment:[REDACTED]\nsecret suffix:[REDACTED]\npassword prefix:[REDACTED]\ncredential fragment:\"[REDACTED]\"\nword:stacktrace\n"
+    );
+  }
+
+  #[test]
+  fn docker_login_output_does_not_redact_short_words_in_normal_error_prose()
+   {
+    assert_eq!(
+      redact_docker_login_token_fragments(
+        "error: authentication to registry failed",
+        "token",
+      ),
+      "error: authentication to registry failed"
+    );
+    assert_eq!(
+      redact_docker_login_token_fragments(
+        "error: denied or unauthorized",
+        "password",
+      ),
+      "error: denied or unauthorized"
+    );
+    assert_eq!(
+      redact_docker_login_token_fragments(
+        "error: retry in 10 seconds",
+        "login",
+      ),
+      "error: retry in 10 seconds"
     );
   }
 
