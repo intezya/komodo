@@ -54,6 +54,36 @@ pub struct PeripheryConnections(
 );
 
 impl PeripheryConnections {
+  /// Create a replacement candidate without publishing it for routing.
+  pub async fn prepare(
+    &self,
+    server_id: String,
+    args: PeripheryConnectionArgs<'_>,
+  ) -> (
+    Arc<PeripheryConnection>,
+    BufferedReceiver<EncodedTransportMessage>,
+  ) {
+    if let Some(existing_connection) = self.0.get(&server_id).await {
+      existing_connection.with_new_args(args)
+    } else {
+      PeripheryConnection::new(args)
+    }
+  }
+
+  /// Publish an authenticated replacement for command routing.
+  pub async fn publish(
+    &self,
+    server_id: String,
+    connection: Arc<PeripheryConnection>,
+  ) {
+    if let Some(existing_connection) = self.0.remove(&server_id).await
+    {
+      existing_connection.deactivate();
+    }
+
+    self.0.insert(server_id, connection).await;
+  }
+
   /// Insert a recreated connection.
   /// Ensures the fields which must be persisted between
   /// connection recreation are carried over.
@@ -68,7 +98,7 @@ impl PeripheryConnections {
     let (connection, receiver) = if let Some(existing_connection) =
       self.0.remove(&server_id).await
     {
-      existing_connection.with_new_args(args)
+      existing_connection.replace_with_new_args(args)
     } else {
       PeripheryConnection::new(args)
     };
@@ -316,8 +346,31 @@ impl PeripheryConnection {
     Arc<PeripheryConnection>,
     BufferedReceiver<EncodedTransportMessage>,
   ) {
-    // Ensure this connection is cancelled.
-    self.cancel();
+    let (sender, receiever) = buffered_channel();
+    (
+      PeripheryConnection {
+        sender,
+        args: args.into(),
+        cancel: CancellationToken::new(),
+        connected: AtomicBool::new(false),
+        last_activity: Mutex::new(Instant::now()),
+        error: Default::default(),
+        responses: self.responses.clone(),
+        terminals: self.terminals.clone(),
+      }
+      .into(),
+      receiever,
+    )
+  }
+
+  pub fn replace_with_new_args(
+    &self,
+    args: impl Into<OwnedPeripheryConnectionArgs>,
+  ) -> (
+    Arc<PeripheryConnection>,
+    BufferedReceiver<EncodedTransportMessage>,
+  ) {
+    self.deactivate();
     let (sender, receiever) = buffered_channel();
     (
       PeripheryConnection {
@@ -569,6 +622,11 @@ impl PeripheryConnection {
   pub fn cancel(&self) {
     self.cancel.cancel();
   }
+
+  pub fn deactivate(&self) {
+    self.set_connected(false);
+    self.cancel();
+  }
 }
 
 /// Spawn task to set the 'attempted_public_key'
@@ -600,22 +658,32 @@ fn spawn_update_attempted_public_key(
 
 #[cfg(test)]
 mod tests {
-  use std::time::{Duration, Instant};
+  use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+  };
+
+  use periphery_client::transport::LoginMessage;
+  use tokio::time::timeout;
 
   use super::{
     DUPLICATE_CONNECTION_STALE_AFTER, PeripheryConnection,
-    PeripheryConnectionArgs,
+    PeripheryConnectionArgs, PeripheryConnections,
   };
+
+  fn test_args<'a>(id: &'a str) -> PeripheryConnectionArgs<'a> {
+    PeripheryConnectionArgs {
+      id,
+      address: None,
+      periphery_public_key: None,
+      passkey: None,
+    }
+  }
 
   #[test]
   fn duplicate_reconnect_rejects_only_recently_active_connections() {
     let (connection, _receiver) =
-      PeripheryConnection::new(PeripheryConnectionArgs {
-        id: "server-1",
-        address: None,
-        periphery_public_key: None,
-        passkey: None,
-      });
+      PeripheryConnection::new(test_args("server-1"));
 
     connection.set_connected(true);
     assert!(connection.should_reject_duplicate_connection());
@@ -625,5 +693,60 @@ mod tests {
       - Duration::from_secs(1);
 
     assert!(!connection.should_reject_duplicate_connection());
+  }
+
+  #[test]
+  fn replacement_candidate_keeps_existing_connection_active_until_publish()
+   {
+    let (connection, _receiver) =
+      PeripheryConnection::new(test_args("server-1"));
+
+    let (_replacement, _replacement_receiver) =
+      connection.with_new_args(test_args("server-1"));
+
+    assert!(
+      !connection.cancel.is_cancelled(),
+      "creating a replacement candidate must not evict the published connection before auth succeeds"
+    );
+  }
+
+  #[tokio::test]
+  async fn published_replacement_routes_new_messages_only_to_replacement()
+   {
+    let connections = PeripheryConnections::default();
+    let server_id = String::from("server-1");
+
+    let (old_connection, mut old_receiver) = connections
+      .insert(server_id.clone(), test_args("server-1"))
+      .await;
+    old_connection.set_connected(true);
+
+    let (replacement, mut replacement_receiver) = connections
+      .insert(server_id.clone(), test_args("server-1"))
+      .await;
+
+    assert!(old_connection.cancel.is_cancelled());
+    assert!(!old_connection.connected());
+
+    let current = connections.get(&server_id).await.unwrap();
+    assert!(Arc::ptr_eq(&current, &replacement));
+
+    current
+      .sender
+      .send_message(LoginMessage::Success)
+      .await
+      .unwrap();
+
+    timeout(Duration::from_millis(100), replacement_receiver.recv())
+      .await
+      .expect("replacement should receive routed message")
+      .unwrap();
+
+    assert!(
+      timeout(Duration::from_millis(100), old_receiver.recv())
+        .await
+        .is_err(),
+      "old connection should not receive newly routed messages after replacement publish"
+    );
   }
 }

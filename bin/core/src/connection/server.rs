@@ -109,14 +109,15 @@ async fn existing_server_handler(
   identifiers: HeaderConnectionIdentifiers,
   ws: WebSocketUpgrade,
 ) -> mogh_error::Result<Response> {
-  let (connection, mut receiver) = periphery_connections()
-    .insert(
+  let connections = periphery_connections();
+  let (connection, mut receiver) = connections
+    .prepare(
       server.id.clone(),
       PeripheryConnectionArgs::from_server(&server),
     )
     .await;
 
-  Ok(ws.on_upgrade(|socket| async move {
+  Ok(ws.on_upgrade(move |socket| async move {
     let query =
       format!("server={}", urlencoding::encode(&server_query));
     let mut socket = AxumWebsocket(socket);
@@ -201,6 +202,10 @@ async fn existing_server_handler(
 
       return;
     }
+
+    connections
+      .publish(server.id.clone(), connection.clone())
+      .await;
 
     // Waits until after connection is handled then
     // force refreshes the server cache.
