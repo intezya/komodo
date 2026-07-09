@@ -21,6 +21,7 @@ CI runs Rust build, tests, and format checks. Add unit tests near the code with 
 ## Commit & Pull Request Guidelines
 Recent history uses short subjects such as `fix ...`, `chore: ...`, and release/version messages. Keep commits focused and imperative; add a scoped prefix when useful. PRs should describe the change, link issues, list verification commands, and include screenshots for visible UI changes.
 Name branches as `scope-do-something-interesting`, without agent prefixes such as `codex/`, `claude/`, or `agent/`. PR titles should be plain descriptive titles and must not start with bracketed agent labels such as `[codex]`.
+Never open PRs or MRs against the source/upstream repository; all pull or merge requests for this fork must target `intezya/komodo`.
 
 ## Security & Configuration Tips
 Do not commit local secrets or environment files. For UI development, place local values such as `VITE_KOMODO_HOST=https://demo.komo.do` in `ui/.env.development`, which is gitignored.
