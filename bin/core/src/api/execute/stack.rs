@@ -32,10 +32,7 @@ use crate::{
   api::write::WriteArgs,
   helpers::{
     periphery_client,
-    query::{
-      VariablesAndSecrets, get_variables_and_secrets,
-      redact_stack_display_secrets, stack_display_secret_replacers,
-    },
+    query::{VariablesAndSecrets, get_variables_and_secrets},
     stack_git_token,
     swarm::swarm_request,
     update::{
@@ -163,8 +160,6 @@ impl Resolve<ExecuteArgs> for DeployStack {
 
     let VariablesAndSecrets { variables, secrets } =
       get_variables_and_secrets().await?;
-    let display_secret_replacers =
-      stack_display_secret_replacers(&secrets);
 
     // interpolate variables / secrets, returning the sanitizing replacers to send to
     // periphery so it may sanitize the final command for safe logging (avoids exposing secret values)
@@ -257,12 +252,7 @@ impl Resolve<ExecuteArgs> for DeployStack {
               })
               .collect(),
           ),
-          merged_config.map(|config| {
-            redact_stack_display_secrets(
-              &config,
-              &display_secret_replacers,
-            )
-          }),
+          merged_config,
           commit_hash.clone(),
           commit_message.clone(),
         )

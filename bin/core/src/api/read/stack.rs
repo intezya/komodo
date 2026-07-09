@@ -810,6 +810,9 @@ mod tests {
         ..Default::default()
       }]);
 
+    let stored_payload = serde_json::to_string(&stack).unwrap();
+    assert!(stored_payload.contains(secret));
+
     let replacers = stack_display_secret_replacers(&secrets);
     redact_stack_read_response(&mut stack, &replacers, true);
 
