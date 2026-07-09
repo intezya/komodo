@@ -39,6 +39,30 @@ use crate::{
 
 use super::ReadArgs;
 
+fn redact_stack_read_response(
+  stack: &mut Stack,
+  display_secret_replacers: &[(String, String)],
+  redact_remote_contents: bool,
+) {
+  if let Some(deployed_config) = stack.info.deployed_config.as_mut() {
+    *deployed_config = redact_stack_display_secrets(
+      deployed_config,
+      display_secret_replacers,
+    );
+  }
+
+  if redact_remote_contents
+    && let Some(remote_contents) = stack.info.remote_contents.as_mut()
+  {
+    for remote_contents in remote_contents {
+      remote_contents.contents = redact_stack_display_secrets(
+        &remote_contents.contents,
+        display_secret_replacers,
+      );
+    }
+  }
+}
+
 impl Resolve<ReadArgs> for GetStack {
   async fn resolve(
     self,
@@ -56,30 +80,16 @@ impl Resolve<ReadArgs> for GetStack {
     let display_secret_replacers =
       stack_display_secret_replacers(&secrets);
 
-    if let Some(deployed_config) = stack.info.deployed_config.as_mut()
-    {
-      *deployed_config = redact_stack_display_secrets(
-        deployed_config,
-        &display_secret_replacers,
-      );
-    }
-
     let permission =
       get_user_permission_on_resource::<Stack>(user, &stack.id)
         .await?;
     // Keep writable file views raw so editors do not round-trip
     // redacted placeholders back onto disk.
-    if permission.level < PermissionLevel::Write
-      && let Some(remote_contents) =
-        stack.info.remote_contents.as_mut()
-    {
-      for remote_contents in remote_contents {
-        remote_contents.contents = redact_stack_display_secrets(
-          &remote_contents.contents,
-          &display_secret_replacers,
-        );
-      }
-    }
+    redact_stack_read_response(
+      &mut stack,
+      &display_secret_replacers,
+      permission.level < PermissionLevel::Write,
+    );
 
     Ok(stack)
   }
@@ -478,15 +488,28 @@ impl Resolve<ReadArgs> for ListFullStacks {
     } else {
       get_all_tags(None).await?
     };
-    Ok(
-      resource::list_full_for_user::<Stack>(
-        self.query,
-        user,
-        PermissionLevel::Read.into(),
-        &all_tags,
-      )
-      .await?,
+    let mut stacks = resource::list_full_for_user::<Stack>(
+      self.query,
+      user,
+      PermissionLevel::Read.into(),
+      &all_tags,
     )
+    .await?;
+
+    let VariablesAndSecrets { secrets, .. } =
+      get_variables_and_secrets().await?;
+    let display_secret_replacers =
+      stack_display_secret_replacers(&secrets);
+
+    for stack in &mut stacks {
+      redact_stack_read_response(
+        stack,
+        &display_secret_replacers,
+        true,
+      );
+    }
+
+    Ok(stacks)
   }
 }
 
@@ -546,5 +569,65 @@ impl Resolve<ReadArgs> for GetStacksSummary {
     }
 
     Ok(res)
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use komodo_client::entities::stack::StackRemoteFileContents;
+
+  use super::*;
+
+  fn sample_stack(secret: &str) -> Stack {
+    let mut stack = Stack::default();
+    stack.info.deployed_config =
+      Some(format!("PASSWORD={secret}\nPUBLIC=value"));
+    stack.info.remote_contents =
+      Some(vec![StackRemoteFileContents {
+        path: "compose.yaml".to_string(),
+        contents: format!("PASSWORD={secret}\nPUBLIC=value"),
+        ..Default::default()
+      }]);
+    stack
+  }
+
+  #[test]
+  fn redacts_full_stack_read_payloads_for_read_only_views() {
+    let mut stack = sample_stack("abc$def");
+
+    redact_stack_read_response(
+      &mut stack,
+      &[("abc$def".to_string(), "[[SECRET]]".to_string())],
+      true,
+    );
+
+    let deployed_config = stack.info.deployed_config.unwrap();
+    assert!(!deployed_config.contains("abc$def"));
+    assert!(deployed_config.contains("[[SECRET]]"));
+
+    let remote_contents =
+      stack.info.remote_contents.unwrap().pop().unwrap().contents;
+    assert!(!remote_contents.contains("abc$def"));
+    assert!(remote_contents.contains("[[SECRET]]"));
+  }
+
+  #[test]
+  fn keeps_remote_contents_raw_for_writable_stack_views() {
+    let mut stack = sample_stack("abc$def");
+
+    redact_stack_read_response(
+      &mut stack,
+      &[("abc$def".to_string(), "[[SECRET]]".to_string())],
+      false,
+    );
+
+    let deployed_config = stack.info.deployed_config.unwrap();
+    assert!(!deployed_config.contains("abc$def"));
+    assert!(deployed_config.contains("[[SECRET]]"));
+
+    let remote_contents =
+      stack.info.remote_contents.unwrap().pop().unwrap().contents;
+    assert!(remote_contents.contains("abc$def"));
+    assert!(!remote_contents.contains("[[SECRET]]"));
   }
 }
