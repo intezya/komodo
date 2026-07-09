@@ -186,6 +186,28 @@ pub struct ComposeUp {
 
 //
 
+/// docker compose up --force-recreate.
+#[derive(Debug, Clone, Serialize, Deserialize, Resolve)]
+#[response(DeployStackResponse)]
+#[error(anyhow::Error)]
+pub struct ComposeForceRecreate {
+  /// The stack to recreate
+  pub stack: Stack,
+  /// Filter to only recreate specific services.
+  /// If empty, will recreate all services.
+  #[serde(default)]
+  pub services: Vec<String>,
+  /// The linked repo, if it exists.
+  pub repo: Option<Repo>,
+  /// If provided, use it to login in. Otherwise check periphery local git providers.
+  pub git_token: Option<String>,
+  /// Propogate any secret replacers from core interpolation.
+  #[serde(default)]
+  pub replacers: Vec<(String, String)>,
+}
+
+//
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ComposeRunResponse {
   /// Logs produced during stack write/prepare for the run
