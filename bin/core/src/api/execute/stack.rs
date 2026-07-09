@@ -53,6 +53,16 @@ use crate::{
 
 use super::{ExecuteArgs, ExecuteRequest};
 
+pub(crate) fn deploy_update_success(
+  deployed: bool,
+  logs: &[Log],
+) -> bool {
+  deployed
+    && logs
+      .iter()
+      .all(|log| log.success || log.stage == "Compose Pull")
+}
+
 impl super::BatchExecute for BatchDeployStack {
   type Resource = Stack;
   fn single_request(stack: String) -> ExecuteRequest {
@@ -325,6 +335,7 @@ impl Resolve<ExecuteArgs> for DeployStack {
     }
 
     update.finalize();
+    update.success = deploy_update_success(deployed, &update.logs);
     update_update(update.clone()).await?;
 
     Ok(update)
