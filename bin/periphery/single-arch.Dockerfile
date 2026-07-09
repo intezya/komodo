@@ -1,7 +1,10 @@
+# syntax=docker/dockerfile:1
+# check=skip=SecretsUsedInArgOrEnv
+
 ## Assumes the latest binaries for the required arch are already built (by binaries.Dockerfile).
 ## Sets up the necessary runtime container dependencies for Komodo Periphery.
 
-ARG BINARIES_IMAGE=ghcr.io/moghtech/komodo-binaries:2
+ARG BINARIES_IMAGE=ghcr.io/intezya/komodo-binaries:2
 
 # This is required to work with COPY --from
 FROM ${BINARIES_IMAGE} AS binaries
@@ -30,6 +33,6 @@ CMD [ "periphery" ]
 # Label to prevent Komodo from stopping with StopAllContainers
 LABEL komodo.skip="true"
 # Label for ghcr
-LABEL org.opencontainers.image.source="https://github.com/moghtech/komodo"
+LABEL org.opencontainers.image.source="https://github.com/intezya/komodo"
 LABEL org.opencontainers.image.description="Komodo Periphery"
 LABEL org.opencontainers.image.licenses="GPL-3.0"

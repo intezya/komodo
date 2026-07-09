@@ -15,45 +15,15 @@ env:
   REPOSITORY: intezya/komodo
 
 jobs:
-  release:
-    name: Build and publish release
+  binaries:
+    name: Build and publish binaries
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set release version
-        run: echo "VERSION=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-
-      - name: Build linux/amd64 binaries
-        run: |
-          docker buildx build \
-            --platform linux/amd64 \
-            --output type=local,dest=dist/linux-amd64 \
-            -f bin/binaries.Dockerfile .
-
-      - name: Prepare release assets
-        run: |
-          mkdir -p dist/assets
-          cp dist/linux-amd64/km dist/assets/km-x86_64
-          cp dist/linux-amd64/periphery dist/assets/periphery-x86_64
-          cp dist/linux-amd64/core dist/assets/core-x86_64
-          chmod +x dist/assets/*
-
-      - name: Create GitHub release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release create "$VERSION" dist/assets/* \
-            --repo "$REPOSITORY" \
-            --title "$VERSION" \
-            --notes "Intezya Komodo release $VERSION"
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -62,35 +32,144 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ github.token }}
 
-      - name: Publish core image
+      - name: Publish binaries image
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: bin/core/aio.Dockerfile
+          file: bin/binaries.Dockerfile
           platforms: linux/amd64
           push: true
           tags: |
-            ghcr.io/intezya/komodo-core:${{ github.ref_name }}
-            ghcr.io/intezya/komodo-core:2
+            ghcr.io/intezya/komodo-binaries:${{ github.ref_name }}
+            ghcr.io/intezya/komodo-binaries:2
+          cache-from: type=gha,scope=komodo-binaries
+          cache-to: type=gha,mode=max,scope=komodo-binaries
 
-      - name: Publish periphery image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: bin/periphery/aio.Dockerfile
-          platforms: linux/amd64
-          push: true
-          tags: |
-            ghcr.io/intezya/komodo-periphery:${{ github.ref_name }}
-            ghcr.io/intezya/komodo-periphery:2
+      - name: Prepare release assets
+        run: |
+          mkdir -p dist/assets
+          docker pull "ghcr.io/intezya/komodo-binaries:${GITHUB_REF_NAME}"
+          container_id="$(docker create "ghcr.io/intezya/komodo-binaries:${GITHUB_REF_NAME}")"
+          docker cp "$container_id:/km" dist/assets/km-x86_64
+          docker cp "$container_id:/periphery" dist/assets/periphery-x86_64
+          docker cp "$container_id:/core" dist/assets/core-x86_64
+          docker rm "$container_id"
+          chmod +x dist/assets/*
 
-      - name: Publish cli image
+      - name: Upload release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-amd64-release-assets
+          path: dist/assets/*
+          if-no-files-found: error
+
+  ui:
+    name: Build and publish ui
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Publish ui image
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: bin/cli/aio.Dockerfile
+          file: ui/Dockerfile
           platforms: linux/amd64
           push: true
           tags: |
-            ghcr.io/intezya/komodo-cli:${{ github.ref_name }}
-            ghcr.io/intezya/komodo-cli:2
+            ghcr.io/intezya/komodo-ui:${{ github.ref_name }}
+            ghcr.io/intezya/komodo-ui:2
+          cache-from: type=gha,scope=komodo-ui
+          cache-to: type=gha,mode=max,scope=komodo-ui
+
+  images:
+    name: Publish ${{ matrix.name }} image
+    runs-on: ubuntu-latest
+    needs:
+      - binaries
+      - ui
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: core
+            dockerfile: bin/core/single-arch.Dockerfile
+            image: komodo-core
+            cache_scope: komodo-core
+            build_args: |
+              BINARIES_IMAGE=ghcr.io/intezya/komodo-binaries:${{ github.ref_name }}
+              UI_IMAGE=ghcr.io/intezya/komodo-ui:${{ github.ref_name }}
+          - name: periphery
+            dockerfile: bin/periphery/single-arch.Dockerfile
+            image: komodo-periphery
+            cache_scope: komodo-periphery
+            build_args: |
+              BINARIES_IMAGE=ghcr.io/intezya/komodo-binaries:${{ github.ref_name }}
+          - name: cli
+            dockerfile: bin/cli/single-arch.Dockerfile
+            image: komodo-cli
+            cache_scope: komodo-cli
+            build_args: |
+              BINARIES_IMAGE=ghcr.io/intezya/komodo-binaries:${{ github.ref_name }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Publish image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64
+          push: true
+          build-args: ${{ matrix.build_args }}
+          tags: |
+            ghcr.io/intezya/${{ matrix.image }}:${{ github.ref_name }}
+            ghcr.io/intezya/${{ matrix.image }}:2
+          cache-from: type=gha,scope=${{ matrix.cache_scope }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.cache_scope }}
+
+  release:
+    name: Create GitHub release
+    runs-on: ubuntu-latest
+    needs:
+      - binaries
+      - images
+
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-amd64-release-assets
+          path: dist/assets
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          gh release create "$VERSION" dist/assets/* \
+            --repo "$REPOSITORY" \
+            --title "$VERSION" \
+            --notes "Intezya Komodo release $VERSION"

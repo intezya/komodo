@@ -20,11 +20,68 @@ if grep -q "moghtech" \
   scripts/readme.md \
   compose/*.compose.yaml \
   bin/binaries.Dockerfile \
-  bin/core/aio.Dockerfile \
-  bin/periphery/aio.Dockerfile \
-  bin/cli/aio.Dockerfile; then
+  bin/core/single-arch.Dockerfile \
+  bin/periphery/single-arch.Dockerfile \
+  bin/cli/single-arch.Dockerfile \
+  ui/Dockerfile; then
   echo "release-critical files still reference moghtech" >&2
   exit 1
 fi
 
-echo "release targets point at intezya"
+if grep -q "aio.Dockerfile" "$release_workflow"; then
+  echo "$release_workflow still rebuilds release images from aio Dockerfiles" >&2
+  exit 1
+fi
+
+for image in komodo-binaries komodo-ui; do
+  if ! grep -q "$image" "$release_workflow"; then
+    echo "$release_workflow does not publish $image" >&2
+    exit 1
+  fi
+done
+
+for dockerfile in \
+  bin/binaries.Dockerfile \
+  ui/Dockerfile \
+  bin/core/single-arch.Dockerfile \
+  bin/periphery/single-arch.Dockerfile \
+  bin/cli/single-arch.Dockerfile; do
+  if ! grep -q "$dockerfile" "$release_workflow"; then
+    echo "$release_workflow does not use $dockerfile" >&2
+    exit 1
+  fi
+
+  if [ ! -f "$dockerfile.dockerignore" ]; then
+    echo "$dockerfile is missing a Dockerfile-specific ignore file" >&2
+    exit 1
+  fi
+done
+
+for cache_directive in "cache-from: type=gha" "cache-to: type=gha,mode=max"; do
+  if ! grep -q "$cache_directive" "$release_workflow"; then
+    echo "$release_workflow is missing $cache_directive" >&2
+    exit 1
+  fi
+done
+
+if grep -q "cargo build -p komodo_core --release &&" bin/binaries.Dockerfile; then
+  echo "bin/binaries.Dockerfile still builds release packages sequentially" >&2
+  exit 1
+fi
+
+if grep -q "cargo install cargo-strip" bin/binaries.Dockerfile; then
+  echo "bin/binaries.Dockerfile still installs cargo-strip during release builds" >&2
+  exit 1
+fi
+
+for cache_mount in \
+  "/usr/local/cargo/registry" \
+  "/usr/local/cargo/git" \
+  "/builder/target"; do
+  if ! grep -q "type=cache,target=$cache_mount" bin/binaries.Dockerfile; then
+    echo "bin/binaries.Dockerfile is missing cache mount $cache_mount" >&2
+    exit 1
+  fi
+done
+
+echo "release targets point at intezya and reuse built artifacts"
