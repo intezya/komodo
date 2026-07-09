@@ -1,11 +1,18 @@
+use std::{
+  io::Error,
+  os::unix::process::ExitStatusExt,
+  process::{ExitStatus, Stdio},
+};
+
 use anyhow::{Context, anyhow};
 use bollard::Docker;
-use command::{run_komodo_standard_command, run_shell_command};
+use command::{CommandOutput, run_komodo_standard_command};
 use komodo_client::entities::{
   TerminationSignal,
   docker::{task::*, *},
   update::Log,
 };
+use tokio::{io::AsyncWriteExt, process::Command};
 
 pub mod compose;
 pub mod config;
@@ -51,27 +58,276 @@ pub async fn docker_login(
     None => crate::helpers::registry_token(domain, account)?,
   };
 
-  let log = run_shell_command(&format!(
-    "echo {registry_token} | docker login {domain} --username '{account}' --password-stdin",
-  ), None)
-  .await;
+  let output = sanitize_docker_login_output(
+    run_docker_login_command(domain, account, registry_token).await,
+    registry_token,
+  );
 
-  if log.success() {
+  if output.success() {
     return Ok(true);
   }
 
   let mut e = anyhow!("End of trace");
-  for line in
-    log.stderr.split('\n').filter(|line| !line.is_empty()).rev()
+  for line in output
+    .stderr
+    .split('\n')
+    .filter(|line| !line.is_empty())
+    .rev()
   {
     e = e.context(line.to_string());
   }
-  for line in
-    log.stdout.split('\n').filter(|line| !line.is_empty()).rev()
+  for line in output
+    .stdout
+    .split('\n')
+    .filter(|line| !line.is_empty())
+    .rev()
   {
     e = e.context(line.to_string());
   }
   Err(e.context(format!("Registry {domain} login error")))
+}
+
+fn docker_login_args(domain: &str, account: &str) -> Vec<String> {
+  vec![
+    "login".into(),
+    domain.into(),
+    "--username".into(),
+    account.into(),
+    "--password-stdin".into(),
+  ]
+}
+
+fn docker_login_error_output(
+  stderr: impl Into<String>,
+) -> CommandOutput {
+  CommandOutput {
+    status: ExitStatus::from_raw(1),
+    stdout: String::new(),
+    stderr: stderr.into(),
+  }
+}
+
+fn sanitize_docker_login_output(
+  output: CommandOutput,
+  registry_token: &str,
+) -> CommandOutput {
+  if registry_token.is_empty() {
+    return output;
+  }
+
+  CommandOutput {
+    stdout: redact_docker_login_token_fragments(
+      &output.stdout,
+      registry_token,
+    ),
+    stderr: redact_docker_login_token_fragments(
+      &output.stderr,
+      registry_token,
+    ),
+    ..output
+  }
+}
+
+fn redact_docker_login_token_fragments(
+  text: &str,
+  registry_token: &str,
+) -> String {
+  let text_chars = text.chars().collect::<Vec<_>>();
+  let token_chars = registry_token.chars().collect::<Vec<_>>();
+  let min_match_len = token_chars.len().min(4);
+
+  if min_match_len == 0 {
+    return text.to_string();
+  }
+
+  let mut redacted = String::with_capacity(text.len());
+  let mut index = 0;
+
+  while index < text_chars.len() {
+    let match_len = longest_token_fragment_match(
+      &text_chars[index..],
+      &token_chars,
+    );
+
+    if is_global_token_fragment_match(match_len, min_match_len)
+      || is_delimited_short_token_fragment(
+        &text_chars,
+        index,
+        match_len,
+      )
+    {
+      redacted.push_str("[REDACTED]");
+      index += match_len;
+      continue;
+    }
+
+    redacted.push(text_chars[index]);
+    index += 1;
+  }
+
+  redacted
+}
+
+fn is_global_token_fragment_match(
+  match_len: usize,
+  min_match_len: usize,
+) -> bool {
+  // Four-character fragments can be common word parts like "auth".
+  match_len >= min_match_len && match_len != 4
+}
+
+fn is_delimited_short_token_fragment(
+  text: &[char],
+  start: usize,
+  match_len: usize,
+) -> bool {
+  if match_len == 0 {
+    return false;
+  }
+
+  let before = start
+    .checked_sub(1)
+    .and_then(|index| text.get(index))
+    .copied();
+  let after = text.get(start + match_len).copied();
+
+  is_non_alphanumeric_boundary(before)
+    && is_non_alphanumeric_boundary(after)
+    && has_short_token_fragment_leak_context(text, start)
+}
+
+fn has_short_token_fragment_leak_context(
+  text: &[char],
+  start: usize,
+) -> bool {
+  let line_start = text[..start]
+    .iter()
+    .rposition(|character| *character == '\n')
+    .map(|index| index + 1)
+    .unwrap_or(0);
+  let context = text[line_start..start]
+    .iter()
+    .collect::<String>()
+    .to_lowercase();
+
+  let has_trailing_padding = context
+    .chars()
+    .last()
+    .is_some_and(is_short_fragment_separator_padding);
+  let context =
+    context.trim_end_matches(is_short_fragment_separator_padding);
+  has_short_fragment_separator_leak_context(context)
+    || (has_trailing_padding
+      && has_short_fragment_whitespace_leak_context(context))
+}
+
+fn has_short_fragment_separator_leak_context(context: &str) -> bool {
+  let Some(separator_index) =
+    context.rfind(|character| character == ':' || character == '=')
+  else {
+    return false;
+  };
+
+  let (label, separator_padding) = context.split_at(separator_index);
+  separator_padding
+    .chars()
+    .skip(1)
+    .all(is_short_fragment_separator_padding)
+    && label
+      .split(|character: char| !character.is_alphanumeric())
+      .any(is_short_fragment_leak_context_word)
+}
+
+fn has_short_fragment_whitespace_leak_context(context: &str) -> bool {
+  context
+    .rsplit(|character: char| !character.is_alphanumeric())
+    .find(|word| !word.is_empty())
+    .is_some_and(is_short_fragment_leak_context_word)
+}
+
+fn is_short_fragment_separator_padding(character: char) -> bool {
+  character.is_whitespace()
+    || character == '\''
+    || character == '"'
+    || character == '`'
+}
+
+fn is_short_fragment_leak_context_word(word: &str) -> bool {
+  matches!(
+    word,
+    "credential" | "credentials" | "password" | "secret" | "token"
+  )
+}
+
+fn is_non_alphanumeric_boundary(character: Option<char>) -> bool {
+  match character {
+    Some(character) => !character.is_alphanumeric(),
+    None => true,
+  }
+}
+
+fn longest_token_fragment_match(
+  text: &[char],
+  registry_token: &[char],
+) -> usize {
+  let mut best = 0;
+
+  for token_start in 0..registry_token.len() {
+    let mut len = 0;
+    while len < text.len()
+      && token_start + len < registry_token.len()
+      && text[len] == registry_token[token_start + len]
+    {
+      len += 1;
+    }
+    best = best.max(len);
+  }
+
+  best
+}
+
+async fn run_docker_login_command(
+  domain: &str,
+  account: &str,
+  registry_token: &str,
+) -> CommandOutput {
+  let mut child = match Command::new("docker")
+    .args(docker_login_args(domain, account))
+    .kill_on_drop(true)
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+  {
+    Ok(child) => child,
+    Err(error) => {
+      return docker_login_error_output(format!(
+        "Failed to start docker login command: {error}"
+      ));
+    }
+  };
+
+  let Some(mut stdin) = child.stdin.take() else {
+    return docker_login_error_output(
+      Error::other("Failed to open docker login stdin").to_string(),
+    );
+  };
+
+  if let Err(error) = stdin.write_all(registry_token.as_bytes()).await
+  {
+    return docker_login_error_output(format!(
+      "Failed to write docker login token to stdin: {error}"
+    ));
+  }
+
+  drop(stdin);
+
+  match child.wait_with_output().await {
+    Ok(output) => CommandOutput::from(Ok(output)),
+    Err(error) => docker_login_error_output(format!(
+      "Failed to wait for docker login command: {error}"
+    )),
+  }
 }
 
 #[instrument("PullImage")]
@@ -478,5 +734,259 @@ fn convert_tls_info(tls_info: bollard::models::TlsInfo) -> TlsInfo {
     trust_root: tls_info.trust_root,
     cert_issuer_subject: tls_info.cert_issuer_subject,
     cert_issuer_public_key: tls_info.cert_issuer_public_key,
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use std::{
+    env,
+    ffi::OsString,
+    fs,
+    os::unix::fs::PermissionsExt,
+    path::PathBuf,
+    sync::{Mutex, OnceLock},
+    time::{SystemTime, UNIX_EPOCH},
+  };
+
+  use super::{
+    docker_login, docker_login_args,
+    redact_docker_login_token_fragments,
+  };
+
+  fn path_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+  }
+
+  struct PathGuard {
+    original_path: Option<OsString>,
+    temp_dir: PathBuf,
+  }
+
+  impl Drop for PathGuard {
+    fn drop(&mut self) {
+      unsafe {
+        match &self.original_path {
+          Some(path) => env::set_var("PATH", path),
+          None => env::remove_var("PATH"),
+        }
+      }
+      let _ = fs::remove_dir_all(&self.temp_dir);
+    }
+  }
+
+  fn unique_temp_dir(name: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+      .duration_since(UNIX_EPOCH)
+      .unwrap()
+      .as_nanos();
+    env::temp_dir()
+      .join(format!("komodo-{name}-{}-{nanos}", std::process::id()))
+  }
+
+  fn install_fake_docker(script: &str) -> PathGuard {
+    let temp_dir = unique_temp_dir("docker-login-test");
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let docker_path = temp_dir.join("docker");
+    fs::write(&docker_path, script).unwrap();
+
+    let mut permissions =
+      fs::metadata(&docker_path).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&docker_path, permissions).unwrap();
+
+    let original_path = env::var_os("PATH");
+    let mut paths = vec![temp_dir.clone()];
+    if let Some(path) = &original_path {
+      paths.extend(env::split_paths(path));
+    }
+    let new_path = env::join_paths(paths).unwrap();
+
+    unsafe {
+      env::set_var("PATH", &new_path);
+    }
+
+    PathGuard {
+      original_path,
+      temp_dir,
+    }
+  }
+
+  fn install_path_without_docker() -> PathGuard {
+    let temp_dir = unique_temp_dir("docker-login-missing");
+    fs::create_dir_all(&temp_dir).unwrap();
+    let original_path = env::var_os("PATH");
+
+    unsafe {
+      env::set_var("PATH", &temp_dir);
+    }
+
+    PathGuard {
+      original_path,
+      temp_dir,
+    }
+  }
+
+  #[test]
+  fn docker_login_args_do_not_include_token() {
+    let token = "abc$def' ghi`jkl";
+    let args = docker_login_args("registry.example.com", "user");
+
+    assert!(!args.join(" ").contains(token));
+    assert!(args.contains(&"--password-stdin".to_string()));
+  }
+
+  #[test]
+  fn docker_login_output_redacts_delimited_short_token_fragments_in_leak_context()
+   {
+    let redacted = redact_docker_login_token_fragments(
+      "token fragment:a\nsecret suffix:bc\npassword prefix:123\ncredential fragment:\"XY\"\ntoken chunk:abc1\nword:stacktrace\n",
+      "abc123XYZ",
+    );
+
+    assert_eq!(
+      redacted,
+      "token fragment:[REDACTED]\nsecret suffix:[REDACTED]\npassword prefix:[REDACTED]\ncredential fragment:\"[REDACTED]\"\ntoken chunk:[REDACTED]\nword:stacktrace\n"
+    );
+  }
+
+  #[test]
+  fn docker_login_output_redacts_whitespace_delimited_short_token_fragments_in_leak_context()
+   {
+    let redacted = redact_docker_login_token_fragments(
+      "token auth failed",
+      "auth-token",
+    );
+    assert!(
+      !redacted.contains("auth"),
+      "redacted output leaked auth fragment: {redacted}"
+    );
+
+    let redacted = redact_docker_login_token_fragments(
+      "secret abc1 rejected",
+      "abc1-secret",
+    );
+    assert!(
+      !redacted.contains("abc1"),
+      "redacted output leaked abc1 fragment: {redacted}"
+    );
+  }
+
+  #[test]
+  fn docker_login_output_does_not_redact_short_words_in_normal_error_prose()
+   {
+    assert_eq!(
+      redact_docker_login_token_fragments(
+        "authentication failed",
+        "auth-token",
+      ),
+      "authentication failed"
+    );
+    assert_eq!(
+      redact_docker_login_token_fragments(
+        "error: authentication to registry failed",
+        "auth-token",
+      ),
+      "error: authentication to registry failed"
+    );
+    assert_eq!(
+      redact_docker_login_token_fragments(
+        "error: denied or unauthorized",
+        "password",
+      ),
+      "error: denied or unauthorized"
+    );
+    assert_eq!(
+      redact_docker_login_token_fragments(
+        "error: retry in 10 seconds",
+        "login",
+      ),
+      "error: retry in 10 seconds"
+    );
+  }
+
+  #[tokio::test]
+  async fn docker_login_writes_shell_special_token_to_stdin_unchanged()
+   {
+    let _lock = path_lock()
+      .lock()
+      .unwrap_or_else(|poison| poison.into_inner());
+    let temp_dir = unique_temp_dir("docker-login-stdin");
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let stdin_path = temp_dir.join("stdin.txt");
+    let args_path = temp_dir.join("args.txt");
+    let _path_guard = install_fake_docker(&format!(
+      "#!/bin/sh\ncat > \"{}\"\nprintf '%s\\n' \"$@\" > \"{}\"\n",
+      stdin_path.display(),
+      args_path.display()
+    ));
+
+    let token = "pa$$ word 'quoted' \"double\" `backtick`\nline two";
+    let logged_in =
+      docker_login("registry.example.com", "user", Some(token))
+        .await
+        .unwrap();
+
+    assert!(logged_in);
+    assert_eq!(fs::read_to_string(stdin_path).unwrap(), token);
+    assert_eq!(
+      fs::read_to_string(args_path).unwrap(),
+      "login\nregistry.example.com\n--username\nuser\n--password-stdin\n"
+    );
+
+    let _ = fs::remove_dir_all(temp_dir);
+  }
+
+  #[tokio::test]
+  async fn docker_login_error_redacts_token_fragments_from_output() {
+    let _lock = path_lock()
+      .lock()
+      .unwrap_or_else(|poison| poison.into_inner());
+    let _path_guard = install_fake_docker(
+      "#!/bin/sh\ntoken=\"$(cat)\"\nprintf 'prefix:%s\\n' \"$(printf '%s' \"$token\" | cut -c1-15)\" >&2\nprintf 'suffix:%s\\n' \"$(printf '%s' \"$token\" | tail -c 19)\" >&2\nprintf 'line:%s\\n' \"$(printf '%s' \"$token\" | tail -n 1)\" >&2\nexit 1\n",
+    );
+
+    let token = "pa$$ word 'quoted' \"double\" `backtick`\nline two";
+    let error =
+      docker_login("registry.example.com", "user", Some(token))
+        .await
+        .unwrap_err();
+    let displayed = format!("{error:#}");
+
+    assert!(
+      displayed.contains("Registry registry.example.com login error")
+    );
+    assert!(!displayed.contains("pa$$ word 'quot"));
+    assert!(!displayed.contains("\" `backtick`"));
+    assert!(!displayed.contains("line two"));
+  }
+
+  #[tokio::test]
+  async fn docker_login_spawn_failures_are_human_readable() {
+    let _lock = path_lock()
+      .lock()
+      .unwrap_or_else(|poison| poison.into_inner());
+    let _path_guard = install_path_without_docker();
+
+    let error = docker_login(
+      "registry.example.com",
+      "user",
+      Some("pa$$ word 'quoted'"),
+    )
+    .await
+    .unwrap_err();
+    let displayed = format!("{error:#}");
+
+    assert!(
+      displayed.contains("Registry registry.example.com login error")
+    );
+    assert!(
+      displayed.contains("Failed to start docker login command")
+    );
+    assert!(!displayed.contains("Os {"));
+    assert!(!displayed.contains("pa$$ word 'quoted'"));
   }
 }
