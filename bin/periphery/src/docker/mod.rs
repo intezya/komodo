@@ -116,10 +116,68 @@ fn sanitize_docker_login_output(
   }
 
   CommandOutput {
-    stdout: output.stdout.replace(registry_token, "[REDACTED]"),
-    stderr: output.stderr.replace(registry_token, "[REDACTED]"),
+    stdout: redact_docker_login_token_fragments(
+      &output.stdout,
+      registry_token,
+    ),
+    stderr: redact_docker_login_token_fragments(
+      &output.stderr,
+      registry_token,
+    ),
     ..output
   }
+}
+
+fn redact_docker_login_token_fragments(
+  text: &str,
+  registry_token: &str,
+) -> String {
+  let text_chars = text.chars().collect::<Vec<_>>();
+  let token_chars = registry_token.chars().collect::<Vec<_>>();
+  let min_match_len = token_chars.len().min(4);
+
+  if min_match_len == 0 {
+    return text.to_string();
+  }
+
+  let mut redacted = String::with_capacity(text.len());
+  let mut index = 0;
+
+  while index < text_chars.len() {
+    let match_len =
+      longest_token_fragment_match(&text_chars[index..], &token_chars);
+
+    if match_len >= min_match_len {
+      redacted.push_str("[REDACTED]");
+      index += match_len;
+      continue;
+    }
+
+    redacted.push(text_chars[index]);
+    index += 1;
+  }
+
+  redacted
+}
+
+fn longest_token_fragment_match(
+  text: &[char],
+  registry_token: &[char],
+) -> usize {
+  let mut best = 0;
+
+  for token_start in 0..registry_token.len() {
+    let mut len = 0;
+    while len < text.len()
+      && token_start + len < registry_token.len()
+      && text[len] == registry_token[token_start + len]
+    {
+      len += 1;
+    }
+    best = best.max(len);
+  }
+
+  best
 }
 
 async fn run_docker_login_command(
@@ -710,7 +768,7 @@ mod tests {
       .lock()
       .unwrap_or_else(|poison| poison.into_inner());
     let _path_guard = install_fake_docker(
-      "#!/bin/sh\ntoken=\"$(cat)\"\nprintf 'docker login failed for %s\\n' \"$token\" >&2\nexit 1\n",
+      "#!/bin/sh\ntoken=\"$(cat)\"\nprintf 'prefix:%s\\n' \"$(printf '%s' \"$token\" | cut -c1-15)\" >&2\nprintf 'suffix:%s\\n' \"$(printf '%s' \"$token\" | tail -c 19)\" >&2\nprintf 'line:%s\\n' \"$(printf '%s' \"$token\" | tail -n 1)\" >&2\nexit 1\n",
     );
 
     let token = "pa$$ word 'quoted' \"double\" `backtick`\nline two";
@@ -723,8 +781,8 @@ mod tests {
     assert!(
       displayed.contains("Registry registry.example.com login error")
     );
-    assert!(!displayed.contains("pa$$ word 'quoted'"));
-    assert!(!displayed.contains("`backtick`"));
+    assert!(!displayed.contains("pa$$ word 'quot"));
+    assert!(!displayed.contains("\" `backtick`"));
     assert!(!displayed.contains("line two"));
   }
 
