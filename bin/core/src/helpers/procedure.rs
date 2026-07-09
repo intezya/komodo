@@ -31,7 +31,9 @@ use crate::{
   state::{all_resources_cache, db_client},
 };
 
-use super::update::{init_execution_update, update_update};
+use super::update::{
+  init_execution_update_after_permission_check, update_update,
+};
 
 pub async fn execute_procedure(
   procedure: &Procedure,
@@ -233,7 +235,9 @@ async fn execute_execution(
   macro_rules! resolve_execute {
     ($Variant:ident, $req:expr) => {{
       let req = ExecuteRequest::$Variant($req);
-      let update = init_execution_update(&req, &user).await?;
+      let update =
+        init_execution_update_after_permission_check(&req, &user)
+          .await?;
       let ExecuteRequest::$Variant(req) = req else {
         unreachable!()
       };

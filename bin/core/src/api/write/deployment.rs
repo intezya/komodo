@@ -558,7 +558,10 @@ pub async fn check_deployment_for_update_inner(
           }
         }
         Err(e) => {
-          warn!("Failed to auto update Deployment {name} | {e:#}",)
+          warn!(
+            "Failed to auto update Deployment {name} | {:#}",
+            e.error
+          )
         }
       }
     };
