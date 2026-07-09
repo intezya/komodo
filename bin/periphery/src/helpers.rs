@@ -114,25 +114,6 @@ pub fn push_environment(
   Ok(())
 }
 
-pub fn format_log_grep(
-  terms: &[String],
-  combinator: SearchCombinator,
-  invert: bool,
-) -> String {
-  let maybe_invert = if invert { " -v" } else { Default::default() };
-  match combinator {
-    SearchCombinator::Or => {
-      format!("grep{maybe_invert} -E '{}'", terms.join("|"))
-    }
-    SearchCombinator::And => {
-      format!(
-        "grep{maybe_invert} -P '^(?=.*{})'",
-        terms.join(")(?=.*")
-      )
-    }
-  }
-}
-
 #[cfg(test)]
 pub fn filter_log_search_log(
   log: Log,
