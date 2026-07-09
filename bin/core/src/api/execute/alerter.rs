@@ -10,11 +10,10 @@ use komodo_client::{
     alerter::Alerter,
     komodo_timestamp,
     permission::PermissionLevel,
+    user::User,
   },
 };
-use mogh_error::AddStatusCodeError;
 use mogh_resolver::Resolve;
-use reqwest::StatusCode;
 
 use crate::{
   alert::send_alert_to_alerter, helpers::update::update_update,
@@ -22,6 +21,86 @@ use crate::{
 };
 
 use super::ExecuteArgs;
+
+async fn get_authorized_send_alert_alerters_with<
+  CheckExecute,
+  CheckExecuteFuture,
+>(
+  send_alert: &SendAlert,
+  user: &User,
+  alerters: Vec<Alerter>,
+  check_execute: CheckExecute,
+) -> anyhow::Result<Vec<Alerter>>
+where
+  CheckExecute: Fn(Alerter) -> CheckExecuteFuture,
+  CheckExecuteFuture:
+    std::future::Future<Output = anyhow::Result<Alerter>>,
+{
+  let alerters = alerters
+    .into_iter()
+    .filter(|alerter| {
+      alerter.config.enabled
+        && (send_alert.alerters.is_empty()
+          || send_alert.alerters.contains(&alerter.name)
+          || send_alert.alerters.contains(&alerter.id))
+        && (alerter.config.alert_types.is_empty()
+          || alerter
+            .config
+            .alert_types
+            .contains(&AlertDataVariant::Custom))
+    })
+    .collect::<Vec<_>>();
+
+  let alerters = if user.admin {
+    alerters
+  } else {
+    alerters
+      .into_iter()
+      .map(check_execute)
+      .collect::<FuturesUnordered<_>>()
+      .collect::<Vec<_>>()
+      .await
+      .into_iter()
+      .flatten()
+      .collect()
+  };
+
+  if alerters.is_empty() {
+    return Err(anyhow!(
+      "Could not find any valid alerters to send to, this required Execute permissions on the Alerter"
+    ));
+  }
+
+  Ok(alerters)
+}
+
+pub(crate) async fn get_authorized_send_alert_alerters(
+  send_alert: &SendAlert,
+  user: &User,
+) -> anyhow::Result<Vec<Alerter>> {
+  let alerters = list_full_for_user::<Alerter>(
+    Default::default(),
+    user,
+    PermissionLevel::Read.into(),
+    &[],
+  )
+  .await?;
+
+  get_authorized_send_alert_alerters_with(
+    send_alert,
+    user,
+    alerters,
+    |alerter| async move {
+      get_check_permissions::<Alerter>(
+        &alerter.id,
+        user,
+        PermissionLevel::Execute.into(),
+      )
+      .await
+    },
+  )
+  .await
+}
 
 impl Resolve<ExecuteArgs> for TestAlerter {
   #[instrument(
@@ -112,51 +191,8 @@ impl Resolve<ExecuteArgs> for SendAlert {
       task_id,
     }: &ExecuteArgs,
   ) -> Result<Self::Response, Self::Error> {
-    let alerters = list_full_for_user::<Alerter>(
-      Default::default(),
-      user,
-      PermissionLevel::Read.into(),
-      &[],
-    )
-    .await?
-    .into_iter()
-    .filter(|a| {
-      a.config.enabled
-        && (self.alerters.is_empty()
-          || self.alerters.contains(&a.name)
-          || self.alerters.contains(&a.id))
-        && (a.config.alert_types.is_empty()
-          || a.config.alert_types.contains(&AlertDataVariant::Custom))
-    })
-    .collect::<Vec<_>>();
-
-    let alerters = if user.admin {
-      alerters
-    } else {
-      // Only keep alerters with execute permissions
-      alerters
-        .into_iter()
-        .map(|alerter| async move {
-          get_check_permissions::<Alerter>(
-            &alerter.id,
-            user,
-            PermissionLevel::Execute.into(),
-          )
-          .await
-        })
-        .collect::<FuturesUnordered<_>>()
-        .collect::<Vec<_>>()
-        .await
-        .into_iter()
-        .flatten()
-        .collect()
-    };
-
-    if alerters.is_empty() {
-      return Err(anyhow!(
-        "Could not find any valid alerters to send to, this required Execute permissions on the Alerter"
-      ).status_code(StatusCode::BAD_REQUEST));
-    }
+    let alerters =
+      get_authorized_send_alert_alerters(&self, user).await?;
 
     let mut update = update.clone();
 
@@ -195,5 +231,69 @@ impl Resolve<ExecuteArgs> for SendAlert {
     update_update(update.clone()).await?;
 
     Ok(update)
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use anyhow::anyhow;
+  use komodo_client::api::execute::SendAlert;
+
+  use super::*;
+
+  #[tokio::test]
+  async fn send_alert_authorization_requires_executable_alerter() {
+    let mut alerter = Alerter::default();
+    alerter.id = String::from("alerter-1");
+    alerter.name = String::from("alerter-1");
+    alerter.config.enabled = true;
+
+    let err = get_authorized_send_alert_alerters_with(
+      &SendAlert {
+        level: Default::default(),
+        message: String::from("test"),
+        details: String::new(),
+        alerters: vec![String::from("alerter-1")],
+      },
+      &User::default(),
+      vec![alerter],
+      |_alerter| async { Err(anyhow!("permission denied")) },
+    )
+    .await
+    .unwrap_err();
+
+    assert!(
+      err
+        .to_string()
+        .contains("Could not find any valid alerters")
+    );
+  }
+
+  #[tokio::test]
+  async fn send_alert_authorization_keeps_authorized_alerter() {
+    let mut alerter = Alerter::default();
+    alerter.id = String::from("alerter-1");
+    alerter.name = String::from("alerter-1");
+    alerter.config.enabled = true;
+
+    let alerters = get_authorized_send_alert_alerters_with(
+      &SendAlert {
+        level: Default::default(),
+        message: String::from("test"),
+        details: String::new(),
+        alerters: vec![String::from("alerter-1")],
+      },
+      &User::default(),
+      vec![alerter.clone()],
+      |_alerter| {
+        let alerter = alerter.clone();
+        async move { Ok(alerter) }
+      },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(alerters.len(), 1);
+    assert_eq!(alerters[0].id, "alerter-1");
   }
 }

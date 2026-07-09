@@ -15,13 +15,11 @@ use komodo_client::{
   },
   entities::{
     SwarmOrServer, deployment::DeploymentState, server::ServerState,
-    stack::StackState, swarm::SwarmState,
+    stack::StackState, swarm::SwarmState, user::User,
   },
 };
-use mogh_error::AddStatusCodeError;
 use mogh_resolver::Resolve;
 use periphery_client::api;
-use reqwest::StatusCode;
 use tokio::sync::Mutex;
 
 use crate::{
@@ -49,6 +47,16 @@ fn clear_repo_cache_lock() -> &'static Mutex<()> {
   LOCK.get_or_init(Default::default)
 }
 
+pub(crate) fn ensure_admin_execution(
+  user: &User,
+) -> anyhow::Result<()> {
+  if user.admin {
+    Ok(())
+  } else {
+    Err(anyhow!("This method is admin only."))
+  }
+}
+
 impl Resolve<ExecuteArgs> for ClearRepoCache {
   #[instrument(
     "ClearRepoCache",
@@ -67,12 +75,7 @@ impl Resolve<ExecuteArgs> for ClearRepoCache {
       task_id,
     }: &ExecuteArgs,
   ) -> Result<Self::Response, Self::Error> {
-    if !user.admin {
-      return Err(
-        anyhow!("This method is admin only.")
-          .status_code(StatusCode::FORBIDDEN),
-      );
-    }
+    ensure_admin_execution(user)?;
 
     let _lock = clear_repo_cache_lock()
       .try_lock()
@@ -150,12 +153,7 @@ impl Resolve<ExecuteArgs> for BackupCoreDatabase {
       task_id,
     }: &ExecuteArgs,
   ) -> Result<Self::Response, Self::Error> {
-    if !user.admin {
-      return Err(
-        anyhow!("This method is admin only.")
-          .status_code(StatusCode::FORBIDDEN),
-      );
-    }
+    ensure_admin_execution(user)?;
 
     let _lock = backup_database_lock()
       .try_lock()
@@ -207,12 +205,7 @@ impl Resolve<ExecuteArgs> for GlobalAutoUpdate {
       task_id,
     }: &ExecuteArgs,
   ) -> Result<Self::Response, Self::Error> {
-    if !user.admin {
-      return Err(
-        anyhow!("This method is admin only.")
-          .status_code(StatusCode::FORBIDDEN),
-      );
-    }
+    ensure_admin_execution(user)?;
 
     let _lock = global_update_lock()
       .try_lock()
@@ -435,12 +428,7 @@ impl Resolve<ExecuteArgs> for RotateAllServerKeys {
       task_id,
     }: &ExecuteArgs,
   ) -> Result<Self::Response, Self::Error> {
-    if !user.admin {
-      return Err(
-        anyhow!("This method is admin only.")
-          .status_code(StatusCode::FORBIDDEN),
-      );
-    }
+    ensure_admin_execution(user)?;
 
     let _lock = global_rotate_lock()
       .try_lock()
@@ -554,12 +542,7 @@ impl Resolve<ExecuteArgs> for RotateCoreKeys {
       task_id,
     }: &ExecuteArgs,
   ) -> Result<Self::Response, Self::Error> {
-    if !user.admin {
-      return Err(
-        anyhow!("This method is admin only.")
-          .status_code(StatusCode::FORBIDDEN),
-      );
-    }
+    ensure_admin_execution(user)?;
 
     let _lock = global_rotate_lock()
       .try_lock()

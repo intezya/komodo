@@ -37,10 +37,10 @@ use crate::{
 };
 
 mod action;
-mod alerter;
+pub(crate) mod alerter;
 mod build;
 mod deployment;
-mod maintenance;
+pub(crate) mod maintenance;
 mod procedure;
 mod repo;
 mod server;

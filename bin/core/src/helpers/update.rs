@@ -24,8 +24,13 @@ use komodo_client::entities::{
 };
 
 use crate::{
-  api::execute::ExecuteRequest, permission::get_check_permissions,
-  resource, state::db_client,
+  api::execute::{
+    ExecuteRequest, alerter::get_authorized_send_alert_alerters,
+    maintenance::ensure_admin_execution,
+  },
+  permission::get_check_permissions,
+  resource,
+  state::db_client,
 };
 
 use super::channel::update_channel;
@@ -327,7 +332,13 @@ pub async fn check_execute_permission_before_update(
           .await?;
         }
         $(
-          ExecuteRequest::$SysVariant(_) => {}
+          ExecuteRequest::$SysVariant(_) => {
+            check_system_execute_permission_before_update(
+              request.clone(),
+              user.clone(),
+            )
+            .await?;
+          }
         )*
       }
     };
@@ -423,6 +434,55 @@ pub async fn check_execute_permission_before_update(
   Ok(())
 }
 
+fn check_system_execute_permission_before_update_with<
+  AuthorizeSendAlert,
+  AuthorizeSendAlertFuture,
+>(
+  request: ExecuteRequest,
+  user: User,
+  authorize_send_alert: AuthorizeSendAlert,
+) -> impl std::future::Future<Output = anyhow::Result<()>>
+where
+  AuthorizeSendAlert: FnOnce(
+    komodo_client::api::execute::SendAlert,
+    User,
+  ) -> AuthorizeSendAlertFuture,
+  AuthorizeSendAlertFuture:
+    std::future::Future<Output = anyhow::Result<Vec<Alerter>>>,
+{
+  async move {
+    match request {
+      ExecuteRequest::SendAlert(data) => {
+        authorize_send_alert(data, user).await?;
+      }
+      ExecuteRequest::ClearRepoCache(_)
+      | ExecuteRequest::BackupCoreDatabase(_)
+      | ExecuteRequest::GlobalAutoUpdate(_)
+      | ExecuteRequest::RotateAllServerKeys(_)
+      | ExecuteRequest::RotateCoreKeys(_) => {
+        ensure_admin_execution(&user)?;
+      }
+      _ => {}
+    }
+
+    Ok(())
+  }
+}
+
+async fn check_system_execute_permission_before_update(
+  request: ExecuteRequest,
+  user: User,
+) -> anyhow::Result<()> {
+  check_system_execute_permission_before_update_with(
+    request,
+    user,
+    |send_alert, user| async move {
+      get_authorized_send_alert_alerters(&send_alert, &user).await
+    },
+  )
+  .await
+}
+
 #[cfg(test)]
 async fn init_execution_update_after_permission_check_with<
   CheckPermissions,
@@ -479,7 +539,9 @@ mod tests {
 
   use anyhow::anyhow;
   use komodo_client::api::execute::{
-    BackupCoreDatabase, BatchDeploy, SendAlert, StartContainer,
+    BackupCoreDatabase, BatchDeploy, ClearRepoCache,
+    GlobalAutoUpdate, RotateAllServerKeys, RotateCoreKeys, SendAlert,
+    StartContainer,
   };
 
   use super::*;
@@ -548,24 +610,116 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn system_execute_requests_skip_permission_preflight() {
+  async fn admin_only_system_execute_requests_require_preflight() {
+    for request in [
+      ExecuteRequest::ClearRepoCache(ClearRepoCache {}),
+      ExecuteRequest::BackupCoreDatabase(BackupCoreDatabase {}),
+      ExecuteRequest::GlobalAutoUpdate(GlobalAutoUpdate {
+        skip_auto_update: false,
+      }),
+      ExecuteRequest::RotateAllServerKeys(RotateAllServerKeys {}),
+      ExecuteRequest::RotateCoreKeys(RotateCoreKeys { force: false }),
+    ] {
+      let err = check_execute_permission_before_update(
+        &request,
+        &User::default(),
+      )
+      .await
+      .unwrap_err();
+
+      assert!(err.to_string().contains("admin only"));
+    }
+  }
+
+  #[tokio::test]
+  async fn admin_only_system_execute_requests_allow_admin() {
+    let admin = User {
+      admin: true,
+      ..Default::default()
+    };
+
     check_execute_permission_before_update(
+      &ExecuteRequest::BackupCoreDatabase(BackupCoreDatabase {}),
+      &admin,
+    )
+    .await
+    .unwrap();
+  }
+
+  #[tokio::test]
+  async fn failed_send_alert_preflight_does_not_initialize_update() {
+    let init_calls = Arc::new(AtomicUsize::new(0));
+
+    let err = init_execution_update_after_permission_check_with(
       &ExecuteRequest::SendAlert(SendAlert {
         level: Default::default(),
         message: "test".to_string(),
         details: String::new(),
-        alerters: Default::default(),
+        alerters: vec![String::from("alerter-a")],
       }),
       &User::default(),
+      |request, user| {
+        let request = request.clone();
+        let user = user.clone();
+        async move {
+          check_system_execute_permission_before_update_with(
+            request,
+            user,
+            |_, _| async { Err(anyhow!("no authorized alerters")) },
+          )
+          .await
+        }
+      },
+      {
+        let init_calls = init_calls.clone();
+        |_, _| async move {
+          init_calls.fetch_add(1, Ordering::Relaxed);
+          Ok(Update::default())
+        }
+      },
+    )
+    .await
+    .unwrap_err();
+
+    assert!(err.to_string().contains("no authorized alerters"));
+    assert_eq!(init_calls.load(Ordering::Relaxed), 0);
+  }
+
+  #[tokio::test]
+  async fn authorized_send_alert_preflight_initializes_update_once() {
+    let init_calls = Arc::new(AtomicUsize::new(0));
+
+    let _ = init_execution_update_after_permission_check_with(
+      &ExecuteRequest::SendAlert(SendAlert {
+        level: Default::default(),
+        message: "test".to_string(),
+        details: String::new(),
+        alerters: vec![String::from("alerter-a")],
+      }),
+      &User::default(),
+      |request, user| {
+        let request = request.clone();
+        let user = user.clone();
+        async move {
+          check_system_execute_permission_before_update_with(
+            request,
+            user,
+            |_, _| async { Ok(vec![Alerter::default()]) },
+          )
+          .await
+        }
+      },
+      {
+        let init_calls = init_calls.clone();
+        |_, _| async move {
+          init_calls.fetch_add(1, Ordering::Relaxed);
+          Ok(Update::default())
+        }
+      },
     )
     .await
     .unwrap();
 
-    check_execute_permission_before_update(
-      &ExecuteRequest::BackupCoreDatabase(BackupCoreDatabase {}),
-      &User::default(),
-    )
-    .await
-    .unwrap();
+    assert_eq!(init_calls.load(Ordering::Relaxed), 1);
   }
 }
