@@ -38,22 +38,12 @@ jobs:
             --output type=local,dest=dist/linux-amd64 \
             -f bin/binaries.Dockerfile .
 
-      - name: Build linux/arm64 binaries
-        run: |
-          docker buildx build \
-            --platform linux/arm64 \
-            --output type=local,dest=dist/linux-arm64 \
-            -f bin/binaries.Dockerfile .
-
       - name: Prepare release assets
         run: |
           mkdir -p dist/assets
           cp dist/linux-amd64/km dist/assets/km-x86_64
           cp dist/linux-amd64/periphery dist/assets/periphery-x86_64
           cp dist/linux-amd64/core dist/assets/core-x86_64
-          cp dist/linux-arm64/km dist/assets/km-aarch64
-          cp dist/linux-arm64/periphery dist/assets/periphery-aarch64
-          cp dist/linux-arm64/core dist/assets/core-aarch64
           chmod +x dist/assets/*
 
       - name: Create GitHub release
@@ -77,7 +67,7 @@ jobs:
         with:
           context: .
           file: bin/core/aio.Dockerfile
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           push: true
           tags: |
             ghcr.io/intezya/komodo-core:${{ github.ref_name }}
@@ -88,7 +78,7 @@ jobs:
         with:
           context: .
           file: bin/periphery/aio.Dockerfile
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           push: true
           tags: |
             ghcr.io/intezya/komodo-periphery:${{ github.ref_name }}
@@ -99,7 +89,7 @@ jobs:
         with:
           context: .
           file: bin/cli/aio.Dockerfile
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           push: true
           tags: |
             ghcr.io/intezya/komodo-cli:${{ github.ref_name }}
