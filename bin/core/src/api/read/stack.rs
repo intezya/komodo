@@ -51,6 +51,17 @@ fn redact_stack_read_response(
     );
   }
 
+  if let Some(deployed_contents) =
+    stack.info.deployed_contents.as_mut()
+  {
+    for deployed_contents in deployed_contents {
+      deployed_contents.contents = redact_stack_display_secrets(
+        &deployed_contents.contents,
+        display_secret_replacers,
+      );
+    }
+  }
+
   if redact_remote_contents
     && let Some(remote_contents) = stack.info.remote_contents.as_mut()
   {
@@ -631,6 +642,7 @@ mod tests {
   use std::collections::HashMap;
 
   use komodo_client::entities::{
+    FileContents,
     docker::{
       ContainerConfig,
       service::ServiceSpec,
@@ -785,6 +797,10 @@ mod tests {
 
     let mut stack = Stack::default();
     stack.config.file_contents = file_contents.to_string();
+    stack.info.deployed_contents = Some(vec![FileContents {
+      path: "compose.yaml".to_string(),
+      contents: emitted_stack.config.file_contents.clone(),
+    }]);
     stack.info.deployed_config =
       Some(emitted_stack.config.file_contents.clone());
     stack.info.remote_contents =
