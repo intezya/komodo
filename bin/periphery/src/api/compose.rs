@@ -1,9 +1,10 @@
-use std::{borrow::Cow, fmt::Write, path::PathBuf};
+use std::{borrow::Cow, fmt::Write, path::PathBuf, time::Duration};
 
 use anyhow::{Context, anyhow};
 use command::{
   KomodoCommandMode, run_komodo_command_with_sanitization,
-  run_komodo_shell_command, run_komodo_standard_command,
+  run_komodo_standard_command,
+  run_komodo_standard_command_with_timeout,
 };
 use formatting::format_serror;
 use git::write_commit_file;
@@ -29,12 +30,14 @@ use tracing::Instrument;
 use crate::{
   config::periphery_config,
   docker::compose::docker_compose,
-  helpers::{format_extra_args, format_log_grep},
+  helpers::{format_extra_args, run_log_search_command_with_timeout},
   stack::{
     maybe_login_registry, pull_or_clone_stack, validate_files,
     write::write_stack,
   },
 };
+
+const LOG_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 
 impl Resolve<crate::api::Args> for GetComposeLog {
   async fn resolve(
@@ -58,8 +61,13 @@ impl Resolve<crate::api::Args> for GetComposeLog {
       services.join(" ")
     );
     Ok(
-      run_komodo_standard_command("Get Stack Log", None, command)
-        .await,
+      run_komodo_standard_command_with_timeout(
+        "Get Stack Log",
+        None,
+        command,
+        LOG_COMMAND_TIMEOUT,
+      )
+      .await,
     )
   }
 }
@@ -78,19 +86,25 @@ impl Resolve<crate::api::Args> for GetComposeLogSearch {
       timestamps,
     } = self;
     let docker_compose = docker_compose();
-    let grep = format_log_grep(&terms, combinator, invert);
     let timestamps = if timestamps {
       " --timestamps"
     } else {
       Default::default()
     };
     let command = format!(
-      "{docker_compose} -p {project} logs --tail 5000{timestamps} {} 2>&1 | {grep}",
+      "{docker_compose} -p {project} logs --tail 5000{timestamps} {}",
       services.join(" ")
     );
     Ok(
-      run_komodo_shell_command("Search Stack Log", None, command)
-        .await,
+      run_log_search_command_with_timeout(
+        "Search Stack Log",
+        command,
+        LOG_COMMAND_TIMEOUT,
+        &terms,
+        combinator,
+        invert,
+      )
+      .await,
     )
   }
 }

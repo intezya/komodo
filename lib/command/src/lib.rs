@@ -2,6 +2,7 @@ use std::{
   path::{Path, PathBuf},
   process::Stdio,
   sync::OnceLock,
+  time::Duration,
 };
 
 use komodo_client::{
@@ -26,6 +27,19 @@ pub async fn run_komodo_standard_command(
   output_into_log(stage, command, start_ts, output)
 }
 
+pub async fn run_komodo_standard_command_with_timeout(
+  stage: &str,
+  path: impl Into<Option<&Path>>,
+  command: impl Into<String>,
+  timeout: Duration,
+) -> Log {
+  let command = command.into();
+  let start_ts = komodo_timestamp();
+  let output =
+    run_standard_command_with_timeout(&command, path, timeout).await;
+  output_into_log(stage, command, start_ts, output)
+}
+
 /// Commands are wrapped in 'sh -c', and can include '&&'
 pub async fn run_komodo_shell_command(
   stage: &str,
@@ -35,6 +49,19 @@ pub async fn run_komodo_shell_command(
   let command = command.into();
   let start_ts = komodo_timestamp();
   let output = run_shell_command(&command, path).await;
+  output_into_log(stage, command, start_ts, output)
+}
+
+pub async fn run_komodo_shell_command_with_timeout(
+  stage: &str,
+  path: impl Into<Option<&Path>>,
+  command: impl Into<String>,
+  timeout: Duration,
+) -> Log {
+  let command = command.into();
+  let start_ts = komodo_timestamp();
+  let output =
+    run_shell_command_with_timeout(&command, path, timeout).await;
   output_into_log(stage, command, start_ts, output)
 }
 
@@ -129,6 +156,22 @@ pub async fn run_standard_command(
   command: &str,
   path: impl Into<Option<&Path>>,
 ) -> CommandOutput {
+  run_standard_command_inner(command, path, None).await
+}
+
+pub async fn run_standard_command_with_timeout(
+  command: &str,
+  path: impl Into<Option<&Path>>,
+  timeout: Duration,
+) -> CommandOutput {
+  run_standard_command_inner(command, path, Some(timeout)).await
+}
+
+async fn run_standard_command_inner(
+  command: &str,
+  path: impl Into<Option<&Path>>,
+  timeout: Option<Duration>,
+) -> CommandOutput {
   let lexed = if let Some(lexed) = shlex::split(command)
     && !lexed.is_empty()
   {
@@ -157,7 +200,7 @@ pub async fn run_standard_command(
     }
   }
 
-  CommandOutput::from(cmd.output().await)
+  run_command_output(cmd, timeout).await
 }
 
 fn shell() -> &'static str {
@@ -183,6 +226,22 @@ pub async fn run_shell_command(
   command: &str,
   path: impl Into<Option<&Path>>,
 ) -> CommandOutput {
+  run_shell_command_inner(command, path, None).await
+}
+
+pub async fn run_shell_command_with_timeout(
+  command: &str,
+  path: impl Into<Option<&Path>>,
+  timeout: Duration,
+) -> CommandOutput {
+  run_shell_command_inner(command, path, Some(timeout)).await
+}
+
+async fn run_shell_command_inner(
+  command: &str,
+  path: impl Into<Option<&Path>>,
+  timeout: Option<Duration>,
+) -> CommandOutput {
   let mut cmd = Command::new(shell());
 
   cmd
@@ -199,5 +258,81 @@ pub async fn run_shell_command(
     }
   }
 
-  CommandOutput::from(cmd.output().await)
+  run_command_output(cmd, timeout).await
+}
+
+async fn run_command_output(
+  mut cmd: Command,
+  timeout: Option<Duration>,
+) -> CommandOutput {
+  match timeout {
+    Some(timeout) => {
+      match tokio::time::timeout(timeout, cmd.output()).await {
+        Ok(output) => CommandOutput::from(output),
+        Err(_) => CommandOutput::from_timeout(timeout),
+      }
+    }
+    None => CommandOutput::from(cmd.output().await),
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use std::time::Duration;
+
+  use super::{
+    run_shell_command_with_timeout, run_standard_command_with_timeout,
+  };
+
+  #[tokio::test]
+  async fn standard_command_timeout_returns_failure() {
+    let out = run_standard_command_with_timeout(
+      "sleep 2",
+      None,
+      Duration::from_millis(100),
+    )
+    .await;
+
+    assert!(!out.success());
+    assert!(out.stderr.contains("Command timed out"));
+  }
+
+  #[tokio::test]
+  async fn standard_command_before_timeout_returns_success() {
+    let out = run_standard_command_with_timeout(
+      "printf ok",
+      None,
+      Duration::from_secs(5),
+    )
+    .await;
+
+    assert!(out.success());
+    assert_eq!(out.stdout, "ok");
+  }
+
+  #[tokio::test]
+  async fn shell_command_timeout_returns_failure() {
+    let out = run_shell_command_with_timeout(
+      "sleep 2",
+      None,
+      Duration::from_millis(100),
+    )
+    .await;
+
+    assert!(!out.success());
+    assert!(out.stderr.contains("Command timed out"));
+  }
+
+  #[tokio::test]
+  async fn shell_command_before_timeout_returns_success() {
+    let out = run_shell_command_with_timeout(
+      "printf ok",
+      None,
+      Duration::from_secs(5),
+    )
+    .await;
+
+    assert!(out.success());
+    assert_eq!(out.stdout, "ok");
+  }
 }
