@@ -25,6 +25,17 @@ impl CommandOutput {
     }
   }
 
+  pub fn from_timeout(timeout: std::time::Duration) -> Self {
+    Self {
+      status: ExitStatus::from_raw(1),
+      stdout: String::new(),
+      stderr: format!(
+        "Command timed out after {}s",
+        timeout.as_secs()
+      ),
+    }
+  }
+
   pub fn from_err(e: io::Error) -> Self {
     Self {
       status: ExitStatus::from_raw(1),

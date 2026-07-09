@@ -1,9 +1,11 @@
 use anyhow::anyhow;
+use interpolate::Interpolator;
 use komodo_client::{
   api::execute::*,
   entities::{
     SwarmOrServer,
     permission::PermissionLevel,
+    repo::Repo,
     server::Server,
     stack::{Stack, StackActionState},
     update::{Log, Update},
@@ -13,9 +15,15 @@ use komodo_client::{
 use periphery_client::api::compose::*;
 
 use crate::{
-  helpers::{periphery_client, update::update_update},
+  helpers::{
+    periphery_client,
+    query::{VariablesAndSecrets, get_variables_and_secrets},
+    stack_git_token,
+    update::update_update,
+  },
   monitor::refresh_server_cache,
   periphery::PeripheryClient,
+  resource,
   state::action_states,
 };
 
@@ -29,7 +37,7 @@ pub trait ExecuteCompose {
     stack: Stack,
     services: Vec<String>,
     extras: Self::Extras,
-  ) -> anyhow::Result<Log>;
+  ) -> anyhow::Result<Vec<Log>>;
 }
 
 pub async fn execute_compose<T: ExecuteCompose>(
@@ -99,7 +107,7 @@ pub async fn execute_compose_with_stack_and_server<
 
   update
     .logs
-    .push(T::execute(periphery, stack, services, extras).await?);
+    .extend(T::execute(periphery, stack, services, extras).await?);
 
   // Ensure cached stack state up to date by updating server cache
   refresh_server_cache(&server, true).await;
@@ -125,14 +133,15 @@ impl ExecuteCompose for StartStack {
     stack: Stack,
     services: Vec<String>,
     _: Self::Extras,
-  ) -> anyhow::Result<Log> {
+  ) -> anyhow::Result<Vec<Log>> {
     let service_args = service_args(&services);
-    periphery
+    let log = periphery
       .request(ComposeExecution {
         project: stack.project_name(false),
         command: format!("start{service_args}"),
       })
-      .await
+      .await?;
+    Ok(vec![log])
   }
 }
 
@@ -143,14 +152,56 @@ impl ExecuteCompose for RestartStack {
     stack: Stack,
     services: Vec<String>,
     _: Self::Extras,
-  ) -> anyhow::Result<Log> {
-    let service_args = service_args(&services);
-    periphery
-      .request(ComposeExecution {
-        project: stack.project_name(false),
-        command: format!("restart{service_args}"),
+  ) -> anyhow::Result<Vec<Log>> {
+    let mut logs = Vec::new();
+    let mut stack = stack;
+    let mut repo = if !stack.config.files_on_host
+      && !stack.config.linked_repo.is_empty()
+    {
+      Some(
+        resource::get::<Repo>(&stack.config.linked_repo)
+          .await?
+          .into(),
+      )
+    } else {
+      None
+    };
+
+    let git_token =
+      stack_git_token(&mut stack, repo.as_mut()).await?;
+
+    let secret_replacers = if !stack.config.skip_secret_interp {
+      let VariablesAndSecrets { variables, secrets } =
+        get_variables_and_secrets().await?;
+
+      let mut interpolator =
+        Interpolator::new(Some(&variables), &secrets);
+
+      interpolator.interpolate_stack(&mut stack)?;
+      if let Some(repo) = repo.as_mut()
+        && !repo.config.skip_secret_interp
+      {
+        interpolator.interpolate_repo(repo)?;
+      }
+      interpolator.push_logs(&mut logs);
+
+      interpolator.secret_replacers
+    } else {
+      Default::default()
+    };
+
+    let res = periphery
+      .request(ComposeForceRecreate {
+        stack,
+        services,
+        repo,
+        git_token,
+        replacers: secret_replacers.into_iter().collect(),
       })
-      .await
+      .await?;
+
+    logs.extend(res.logs);
+    Ok(logs)
   }
 }
 
@@ -161,14 +212,15 @@ impl ExecuteCompose for PauseStack {
     stack: Stack,
     services: Vec<String>,
     _: Self::Extras,
-  ) -> anyhow::Result<Log> {
+  ) -> anyhow::Result<Vec<Log>> {
     let service_args = service_args(&services);
-    periphery
+    let log = periphery
       .request(ComposeExecution {
         project: stack.project_name(false),
         command: format!("pause{service_args}"),
       })
-      .await
+      .await?;
+    Ok(vec![log])
   }
 }
 
@@ -179,14 +231,15 @@ impl ExecuteCompose for UnpauseStack {
     stack: Stack,
     services: Vec<String>,
     _: Self::Extras,
-  ) -> anyhow::Result<Log> {
+  ) -> anyhow::Result<Vec<Log>> {
     let service_args = service_args(&services);
-    periphery
+    let log = periphery
       .request(ComposeExecution {
         project: stack.project_name(false),
         command: format!("unpause{service_args}"),
       })
-      .await
+      .await?;
+    Ok(vec![log])
   }
 }
 
@@ -197,15 +250,16 @@ impl ExecuteCompose for StopStack {
     stack: Stack,
     services: Vec<String>,
     timeout: Self::Extras,
-  ) -> anyhow::Result<Log> {
+  ) -> anyhow::Result<Vec<Log>> {
     let service_args = service_args(&services);
     let maybe_timeout = maybe_timeout(timeout);
-    periphery
+    let log = periphery
       .request(ComposeExecution {
         project: stack.project_name(false),
         command: format!("stop{maybe_timeout}{service_args}"),
       })
-      .await
+      .await?;
+    Ok(vec![log])
   }
 }
 
@@ -216,7 +270,7 @@ impl ExecuteCompose for DestroyStack {
     stack: Stack,
     services: Vec<String>,
     (timeout, remove_orphans): Self::Extras,
-  ) -> anyhow::Result<Log> {
+  ) -> anyhow::Result<Vec<Log>> {
     let service_args = service_args(&services);
     let maybe_timeout = maybe_timeout(timeout);
     let maybe_remove_orphans = if remove_orphans {
@@ -224,14 +278,15 @@ impl ExecuteCompose for DestroyStack {
     } else {
       ""
     };
-    periphery
+    let log = periphery
       .request(ComposeExecution {
         project: stack.project_name(false),
         command: format!(
           "down{maybe_timeout}{maybe_remove_orphans}{service_args}"
         ),
       })
-      .await
+      .await?;
+    Ok(vec![log])
   }
 }
 

@@ -1,9 +1,10 @@
-use std::{borrow::Cow, fmt::Write, path::PathBuf};
+use std::{borrow::Cow, fmt::Write, path::PathBuf, time::Duration};
 
 use anyhow::{Context, anyhow};
 use command::{
   KomodoCommandMode, run_komodo_command_with_sanitization,
-  run_komodo_shell_command, run_komodo_standard_command,
+  run_komodo_standard_command,
+  run_komodo_standard_command_with_timeout,
 };
 use formatting::format_serror;
 use git::write_commit_file;
@@ -29,12 +30,14 @@ use tracing::Instrument;
 use crate::{
   config::periphery_config,
   docker::compose::docker_compose,
-  helpers::{format_extra_args, format_log_grep},
+  helpers::{format_extra_args, run_log_search_command_with_timeout},
   stack::{
     maybe_login_registry, pull_or_clone_stack, validate_files,
     write::write_stack,
   },
 };
+
+const LOG_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 
 impl Resolve<crate::api::Args> for GetComposeLog {
   async fn resolve(
@@ -58,8 +61,13 @@ impl Resolve<crate::api::Args> for GetComposeLog {
       services.join(" ")
     );
     Ok(
-      run_komodo_standard_command("Get Stack Log", None, command)
-        .await,
+      run_komodo_standard_command_with_timeout(
+        "Get Stack Log",
+        None,
+        command,
+        LOG_COMMAND_TIMEOUT,
+      )
+      .await,
     )
   }
 }
@@ -78,19 +86,25 @@ impl Resolve<crate::api::Args> for GetComposeLogSearch {
       timestamps,
     } = self;
     let docker_compose = docker_compose();
-    let grep = format_log_grep(&terms, combinator, invert);
     let timestamps = if timestamps {
       " --timestamps"
     } else {
       Default::default()
     };
     let command = format!(
-      "{docker_compose} -p {project} logs --tail 5000{timestamps} {} 2>&1 | {grep}",
+      "{docker_compose} -p {project} logs --tail 5000{timestamps} {}",
       services.join(" ")
     );
     Ok(
-      run_komodo_shell_command("Search Stack Log", None, command)
-        .await,
+      run_log_search_command_with_timeout(
+        "Search Stack Log",
+        command,
+        LOG_COMMAND_TIMEOUT,
+        &terms,
+        combinator,
+        invert,
+      )
+      .await,
     )
   }
 }
@@ -670,7 +684,8 @@ impl Resolve<crate::api::Args> for ComposeUp {
     // Pull images before deploying
     if stack.config.auto_pull {
       // Pull images before destroying to minimize downtime.
-      // If this fails, do not continue.
+      // A pull failure is still logged, but a later successful up can
+      // still deploy using locally cached images.
       let command = format!(
         "{docker_compose} -p {project_name} -f {file_args}{env_file_args} pull{service_args}",
       );
@@ -705,9 +720,6 @@ impl Resolve<crate::api::Args> for ComposeUp {
         unreachable!()
       };
       res.logs.push(log);
-      if !all_logs_success(&res.logs) {
-        return Ok(res);
-      }
     }
 
     if stack.config.destroy_before_deploy
@@ -723,8 +735,14 @@ impl Resolve<crate::api::Args> for ComposeUp {
 
     // Run compose up
     let extra_args = format_extra_args(&stack.config.extra_args);
-    let command = format!(
-      "{docker_compose} -p {project_name} -f {file_args}{env_file_args} up -d{extra_args}{service_args}",
+    let command = compose_up_command(
+      &docker_compose,
+      &project_name,
+      &file_args,
+      &env_file_args,
+      &extra_args,
+      &services,
+      false,
     );
     let (command, _) = match maybe_wrap_command(
       command,
@@ -753,8 +771,8 @@ impl Resolve<crate::api::Args> for ComposeUp {
       unreachable!()
     };
 
-    res.deployed = log.success;
     res.logs.push(log);
+    res.deployed = deploy_succeeded_from_logs(&res.logs);
 
     if res.deployed && !stack.config.post_deploy.is_none() {
       let post_deploy_path =
@@ -777,6 +795,133 @@ impl Resolve<crate::api::Args> for ComposeUp {
         res.logs.push(log);
       };
     }
+
+    Ok(res)
+  }
+}
+
+//
+
+impl Resolve<crate::api::Args> for ComposeForceRecreate {
+  #[instrument(
+    "ComposeForceRecreate",
+    skip_all,
+    fields(
+      id = args.id.to_string(),
+      core = args.core,
+      stack = self.stack.name,
+      repo = self.repo.as_ref().map(|repo| &repo.name),
+      services = format!("{:?}", self.services),
+    )
+  )]
+  async fn resolve(
+    self,
+    args: &crate::api::Args,
+  ) -> anyhow::Result<DeployStackResponse> {
+    let ComposeForceRecreate {
+      mut stack,
+      repo,
+      services,
+      git_token,
+      mut replacers,
+    } = self;
+
+    let mut res = DeployStackResponse::default();
+
+    let mut interpolator =
+      Interpolator::new(None, &periphery_config().secrets);
+    interpolator
+      .interpolate_stack(&mut stack)?
+      .push_logs(&mut res.logs);
+    replacers.extend(interpolator.secret_replacers);
+
+    let (run_directory, env_file_path) = match write_stack(
+      &stack,
+      repo.as_ref(),
+      git_token,
+      replacers.clone(),
+      &mut res,
+      args,
+    )
+    .await
+    {
+      Ok(res) => res,
+      Err(e) => {
+        res
+          .logs
+          .push(Log::error("Write Stack", format_serror(&e.into())));
+        return Ok(res);
+      }
+    };
+
+    let run_directory = run_directory.canonicalize().with_context(||
+      format!("Failed to validate run directory on host after stack write (canonicalize error), path={}", run_directory.to_string_lossy()),
+    )?;
+
+    validate_files(&stack, &run_directory, &mut res).await;
+    if !all_logs_success(&res.logs) {
+      return Ok(res);
+    }
+
+    let docker_compose = docker_compose();
+    let file_args = stack.compose_file_paths().join(" -f ");
+    let project_name = stack.project_name(false);
+    let env_file_args = env_file_args(
+      env_file_path,
+      &stack.config.additional_env_files,
+    )?;
+
+    let compose_cmd_wrapper =
+      parse_multiline_command(&stack.config.compose_cmd_wrapper);
+    let default_include = vec![String::from("up")];
+    let wrapper_include =
+      if stack.config.compose_cmd_wrapper_include.is_empty()
+        && !compose_cmd_wrapper.is_empty()
+      {
+        &default_include
+      } else {
+        &stack.config.compose_cmd_wrapper_include
+      };
+
+    let extra_args = format_extra_args(&stack.config.extra_args);
+    let command = compose_up_command(
+      &docker_compose,
+      &project_name,
+      &file_args,
+      &env_file_args,
+      &extra_args,
+      &services,
+      true,
+    );
+    let (command, _) = match maybe_wrap_command(
+      command,
+      &compose_cmd_wrapper,
+      wrapper_include,
+      "up",
+    ) {
+      Ok(result) => result,
+      Err(log) => {
+        res.logs.push(log);
+        return Ok(res);
+      }
+    };
+
+    let span = info_span!("ExecuteComposeForceRecreate");
+    let Some(log) = run_komodo_command_with_sanitization(
+      "Compose Force Recreate",
+      run_directory.as_path(),
+      command,
+      KomodoCommandMode::Shell,
+      &replacers,
+    )
+    .instrument(span)
+    .await
+    else {
+      unreachable!()
+    };
+
+    res.deployed = log.success;
+    res.logs.push(log);
 
     Ok(res)
   }
@@ -1044,6 +1189,30 @@ fn env_file_args(
   Ok(res)
 }
 
+fn compose_up_command(
+  docker_compose: &str,
+  project_name: &str,
+  file_args: &str,
+  env_file_args: &str,
+  extra_args: &str,
+  services: &[String],
+  force_recreate: bool,
+) -> String {
+  let service_args = if services.is_empty() {
+    String::new()
+  } else {
+    format!(" {}", services.join(" "))
+  };
+  let recreate_args = match (force_recreate, services.is_empty()) {
+    (true, true) => " --force-recreate",
+    (true, false) => " --force-recreate --no-deps",
+    (false, _) => "",
+  };
+  format!(
+    "{docker_compose} -p {project_name} -f {file_args}{env_file_args} up -d{extra_args}{recreate_args}{service_args}",
+  )
+}
+
 /// Apply compose_cmd_wrapper to command if the subcommand is in wrapper_include list.
 /// Returns Ok((command, wrapped)) where `wrapped` indicates if wrapper was applied.
 /// Returns Err(Log) if wrapper is invalid (missing placeholder).
@@ -1069,6 +1238,27 @@ fn maybe_wrap_command(
   }
 
   Ok((wrapper.replace("[[COMPOSE_COMMAND]]", &command), true))
+}
+
+fn deploy_succeeded_from_logs(logs: &[Log]) -> bool {
+  logs
+    .iter()
+    .rev()
+    .find(|log| log.stage == "Compose Up")
+    .map(|log| log.success)
+    .unwrap_or(false)
+}
+
+#[cfg(test)]
+pub(crate) fn deploy_response_from_logs(
+  logs: Vec<Log>,
+) -> DeployStackResponse {
+  let deployed = deploy_succeeded_from_logs(&logs);
+  DeployStackResponse {
+    logs,
+    deployed,
+    ..Default::default()
+  }
 }
 
 #[instrument("ComposeDown", skip(res))]
@@ -1098,4 +1288,45 @@ async fn compose_down(
   }
 
   Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn compose_up_command_force_recreates_stack_containers() {
+    let command = compose_up_command(
+      "docker compose",
+      "my-stack",
+      "compose.yaml -f compose.prod.yaml",
+      " --env-file prod.env",
+      "",
+      &[],
+      true,
+    );
+
+    assert_eq!(
+      command,
+      "docker compose -p my-stack -f compose.yaml -f compose.prod.yaml --env-file prod.env up -d --force-recreate"
+    );
+  }
+
+  #[test]
+  fn compose_up_command_force_recreates_only_selected_services() {
+    let command = compose_up_command(
+      "docker compose",
+      "my-stack",
+      "compose.yaml",
+      "",
+      "",
+      &[String::from("api")],
+      true,
+    );
+
+    assert_eq!(
+      command,
+      "docker compose -p my-stack -f compose.yaml up -d --force-recreate --no-deps api"
+    );
+  }
 }

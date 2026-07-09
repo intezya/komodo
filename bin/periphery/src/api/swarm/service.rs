@@ -1,9 +1,9 @@
-use std::fmt::Write;
+use std::{fmt::Write, time::Duration};
 
 use anyhow::Context as _;
 use command::{
   KomodoCommandMode, run_komodo_command_with_sanitization,
-  run_komodo_shell_command, run_komodo_standard_command,
+  run_komodo_standard_command,
 };
 use formatting::format_serror;
 use interpolate::Interpolator;
@@ -28,11 +28,13 @@ use crate::{
   config::periphery_config,
   docker::docker_login,
   helpers::{
-    format_log_grep, push_conversions, push_environment,
-    push_extra_args, push_labels,
+    push_conversions, push_environment, push_extra_args, push_labels,
+    run_log_search_command_with_timeout,
   },
   state::docker_client,
 };
+
+const LOG_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 
 impl Resolve<crate::api::Args> for InspectSwarmService {
   async fn resolve(
@@ -130,15 +132,17 @@ impl Resolve<crate::api::Args> for GetSwarmServiceLogSearch {
     } else {
       Default::default()
     };
-    let grep = format_log_grep(&terms, combinator, invert);
     let command = format!(
-      "docker service logs --tail 5000{timestamps}{no_task_ids}{no_resolve}{details} {service} 2>&1 | {grep}",
+      "docker service logs --tail 5000{timestamps}{no_task_ids}{no_resolve}{details} {service}",
     );
     Ok(
-      run_komodo_shell_command(
+      run_log_search_command_with_timeout(
         "Search Swarm Service Log",
-        None,
         command,
+        LOG_COMMAND_TIMEOUT,
+        &terms,
+        combinator,
+        invert,
       )
       .await,
     )

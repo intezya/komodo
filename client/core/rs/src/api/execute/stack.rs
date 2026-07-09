@@ -273,7 +273,7 @@ pub struct StartStack {
 )]
 pub fn restart_stack() {}
 
-/// Restarts the target stack. `docker compose restart`. Response: [Update]
+/// Restarts the target stack. `docker compose up --force-recreate`. Response: [Update]
 #[typeshare]
 #[derive(
   Debug, Clone, PartialEq, Serialize, Deserialize, Resolve, Parser,

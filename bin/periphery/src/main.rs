@@ -117,3 +117,50 @@ async fn main() -> anyhow::Result<()> {
     },
   }
 }
+
+#[cfg(test)]
+mod deploy_stack_tests {
+  use komodo_client::entities::update::Log;
+
+  fn log(stage: &str, success: bool) -> Log {
+    Log {
+      stage: stage.into(),
+      success,
+      ..Default::default()
+    }
+  }
+
+  #[test]
+  fn compose_deploy_keeps_failed_pull_log_when_up_succeeds() {
+    let res = crate::api::compose_deploy_response_from_logs(vec![
+      log("Compose Pull", false),
+      log("Compose Up", true),
+    ]);
+
+    assert!(res.deployed);
+    assert_eq!(res.logs.len(), 2);
+    assert_eq!(res.logs[0].stage, "Compose Pull");
+    assert!(!res.logs[0].success);
+  }
+
+  #[test]
+  fn compose_deploy_requires_compose_up() {
+    let res =
+      crate::api::compose_deploy_response_from_logs(vec![log(
+        "Compose Pull",
+        false,
+      )]);
+
+    assert!(!res.deployed);
+  }
+
+  #[test]
+  fn compose_deploy_is_false_when_up_fails() {
+    let res = crate::api::compose_deploy_response_from_logs(vec![
+      log("Compose Pull", false),
+      log("Compose Up", false),
+    ]);
+
+    assert!(!res.deployed);
+  }
+}

@@ -1,9 +1,14 @@
+use std::time::Duration;
+
 use anyhow::{Context, anyhow};
-use command::run_komodo_standard_command;
+use command::run_komodo_standard_command_with_timeout;
 use komodo_client::entities::stack::ComposeProject;
 use serde::{Deserialize, Serialize};
 
 use crate::config::periphery_config;
+
+const LIST_PROJECTS_COMMAND_TIMEOUT: Duration =
+  Duration::from_secs(10);
 
 pub fn docker_compose() -> &'static str {
   if periphery_config().legacy_compose_cli {
@@ -16,10 +21,11 @@ pub fn docker_compose() -> &'static str {
 pub async fn list_compose_projects()
 -> anyhow::Result<Vec<ComposeProject>> {
   let docker_compose = docker_compose();
-  let res = run_komodo_standard_command(
+  let res = run_komodo_standard_command_with_timeout(
     "List Projects",
     None,
     format!("{docker_compose} ls --all --format json"),
+    LIST_PROJECTS_COMMAND_TIMEOUT,
   )
   .await;
 
