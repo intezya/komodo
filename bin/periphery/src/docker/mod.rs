@@ -210,8 +210,18 @@ fn has_short_token_fragment_leak_context(
     .collect::<String>()
     .to_lowercase();
 
+  let has_trailing_padding = context
+    .chars()
+    .last()
+    .is_some_and(is_short_fragment_separator_padding);
   let context =
     context.trim_end_matches(is_short_fragment_separator_padding);
+  has_short_fragment_separator_leak_context(context)
+    || (has_trailing_padding
+      && has_short_fragment_whitespace_leak_context(context))
+}
+
+fn has_short_fragment_separator_leak_context(context: &str) -> bool {
   let Some(separator_index) =
     context.rfind(|character| character == ':' || character == '=')
   else {
@@ -226,6 +236,13 @@ fn has_short_token_fragment_leak_context(
     && label
       .split(|character: char| !character.is_alphanumeric())
       .any(is_short_fragment_leak_context_word)
+}
+
+fn has_short_fragment_whitespace_leak_context(context: &str) -> bool {
+  context
+    .rsplit(|character: char| !character.is_alphanumeric())
+    .find(|word| !word.is_empty())
+    .is_some_and(is_short_fragment_leak_context_word)
 }
 
 fn is_short_fragment_separator_padding(character: char) -> bool {
@@ -836,8 +853,37 @@ mod tests {
   }
 
   #[test]
+  fn docker_login_output_redacts_whitespace_delimited_short_token_fragments_in_leak_context()
+   {
+    let redacted = redact_docker_login_token_fragments(
+      "token auth failed",
+      "auth-token",
+    );
+    assert!(
+      !redacted.contains("auth"),
+      "redacted output leaked auth fragment: {redacted}"
+    );
+
+    let redacted = redact_docker_login_token_fragments(
+      "secret abc1 rejected",
+      "abc1-secret",
+    );
+    assert!(
+      !redacted.contains("abc1"),
+      "redacted output leaked abc1 fragment: {redacted}"
+    );
+  }
+
+  #[test]
   fn docker_login_output_does_not_redact_short_words_in_normal_error_prose()
    {
+    assert_eq!(
+      redact_docker_login_token_fragments(
+        "authentication failed",
+        "auth-token",
+      ),
+      "authentication failed"
+    );
     assert_eq!(
       redact_docker_login_token_fragments(
         "error: authentication to registry failed",
