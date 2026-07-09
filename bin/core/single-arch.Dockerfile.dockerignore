@@ -1,0 +1,8 @@
+*
+!bin/
+!bin/core/
+!bin/core/starship.toml
+!bin/core/debian-deps.sh
+!bin/entrypoint.sh
+!config/
+!config/core.config.toml

@@ -1,0 +1,6 @@
+*
+!bin/
+!bin/periphery/
+!bin/periphery/starship.toml
+!bin/periphery/debian-deps.sh
+!bin/entrypoint.sh

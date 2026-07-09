@@ -1,18 +1,12 @@
 ## Assumes the latest binaries for the required arch are already built (by binaries.Dockerfile).
 ## Sets up the necessary runtime container dependencies for Komodo Core.
 
-ARG BINARIES_IMAGE=ghcr.io/moghtech/komodo-binaries:2
+ARG BINARIES_IMAGE=ghcr.io/intezya/komodo-binaries:2
+ARG UI_IMAGE=ghcr.io/intezya/komodo-ui:2
 
 # This is required to work with COPY --from
 FROM ${BINARIES_IMAGE} AS binaries
-
-# Build UI
-FROM node:22.12-alpine AS ui-builder
-WORKDIR /builder
-COPY ./ui ./ui
-COPY ./client/core/ts ./client
-RUN cd client && yarn && yarn build && yarn link
-RUN cd ui && yarn link komodo_client && yarn && yarn build
+FROM ${UI_IMAGE} AS ui
 
 FROM debian:trixie-slim
 
@@ -22,7 +16,7 @@ RUN sh ./debian-deps.sh && rm ./debian-deps.sh
 	
 # Copy
 COPY ./config/core.config.toml /config/.default.config.toml
-COPY --from=ui-builder /builder/ui/dist /app/ui
+COPY --from=ui /ui /app/ui
 COPY --from=binaries /core /usr/local/bin/core
 COPY --from=binaries /km /usr/local/bin/km
 COPY --from=denoland/deno:bin /deno /usr/local/bin/deno
@@ -49,6 +43,6 @@ CMD [ "core" ]
 # Label to prevent Komodo from stopping with StopAllContainers
 LABEL komodo.skip="true"
 # Label for Ghcr
-LABEL org.opencontainers.image.source="https://github.com/moghtech/komodo"
+LABEL org.opencontainers.image.source="https://github.com/intezya/komodo"
 LABEL org.opencontainers.image.description="Komodo Core"
 LABEL org.opencontainers.image.licenses="GPL-3.0"
