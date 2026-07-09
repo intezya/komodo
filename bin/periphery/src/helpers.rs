@@ -1,12 +1,12 @@
 use std::{
-  borrow::Cow, fmt::Write, net::IpAddr, path::PathBuf,
-  str::FromStr as _, sync::OnceLock, time::Duration,
+  fmt::Write, net::IpAddr, path::PathBuf, str::FromStr as _,
+  sync::OnceLock, time::Duration,
 };
 
 use anyhow::Context;
 use command::{
   KomodoCommandMode, run_komodo_command_with_sanitization,
-  run_standard_command,
+  run_komodo_shell_command_with_timeout, run_standard_command,
 };
 use environment::write_env_file;
 use interpolate::Interpolator;
@@ -133,6 +133,7 @@ pub fn format_log_grep(
   }
 }
 
+#[cfg(test)]
 pub fn filter_log_search_log(
   log: Log,
   terms: &[String],
@@ -141,6 +142,27 @@ pub fn filter_log_search_log(
 ) -> Log {
   let output =
     combine_log_output(&log.stdout, &log.stderr).into_owned();
+  filter_log_search_output(log, terms, combinator, invert, &output)
+}
+
+pub async fn run_log_search_command_with_timeout(
+  stage: &str,
+  command: impl Into<String>,
+  timeout: Duration,
+  terms: &[String],
+  combinator: SearchCombinator,
+  invert: bool,
+) -> Log {
+  let command = format!("({}) 2>&1", command.into());
+  let mut log = run_komodo_shell_command_with_timeout(
+    stage, None, command, timeout,
+  )
+  .await;
+  if !log.success {
+    return log;
+  }
+
+  let output = std::mem::take(&mut log.stdout);
   filter_log_search_output(log, terms, combinator, invert, &output)
 }
 
@@ -175,15 +197,18 @@ pub fn filter_log_search_output(
   log
 }
 
+#[cfg(test)]
 fn combine_log_output<'a>(
   stdout: &'a str,
   stderr: &'a str,
-) -> Cow<'a, str> {
+) -> std::borrow::Cow<'a, str> {
   match (stdout.is_empty(), stderr.is_empty()) {
-    (false, false) => Cow::Owned(format!("{stdout}\n{stderr}")),
-    (false, true) => Cow::Borrowed(stdout),
-    (true, false) => Cow::Borrowed(stderr),
-    (true, true) => Cow::Borrowed(""),
+    (false, false) => {
+      std::borrow::Cow::Owned(format!("{stdout}\n{stderr}"))
+    }
+    (false, true) => std::borrow::Cow::Borrowed(stdout),
+    (true, false) => std::borrow::Cow::Borrowed(stderr),
+    (true, true) => std::borrow::Cow::Borrowed(""),
   }
 }
 
@@ -226,9 +251,14 @@ fn filter_log_content(
 
 #[cfg(test)]
 mod tests {
+  use std::time::Duration;
+
   use komodo_client::entities::{SearchCombinator, update::Log};
 
-  use super::{filter_log_content, filter_log_search_log};
+  use super::{
+    filter_log_content, filter_log_search_log,
+    run_log_search_command_with_timeout,
+  };
 
   #[test]
   fn filter_log_content_matches_any_term_for_or_searches() {
@@ -317,6 +347,26 @@ mod tests {
 
     assert!(!filtered.success);
     assert!(filtered.stdout.is_empty());
+    assert!(filtered.stderr.is_empty());
+  }
+
+  #[tokio::test]
+  async fn run_log_search_command_preserves_merged_stream_order() {
+    let filtered = run_log_search_command_with_timeout(
+      "Search Log",
+      "sh -lc 'echo stdout-match-1; sleep 0.05; echo stderr-match-1 >&2; sleep 0.05; echo stdout-match-2; sleep 0.05; echo stderr-skip >&2'",
+      Duration::from_secs(5),
+      &["match".into()],
+      SearchCombinator::Or,
+      false,
+    )
+    .await;
+
+    assert!(filtered.success);
+    assert_eq!(
+      filtered.stdout,
+      "stdout-match-1\nstderr-match-1\nstdout-match-2"
+    );
     assert!(filtered.stderr.is_empty());
   }
 }
