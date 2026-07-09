@@ -149,7 +149,7 @@ fn redact_docker_login_token_fragments(
       &token_chars,
     );
 
-    if match_len >= min_match_len
+    if is_global_token_fragment_match(match_len, min_match_len)
       || is_delimited_short_token_fragment(
         &text_chars,
         index,
@@ -166,6 +166,14 @@ fn redact_docker_login_token_fragments(
   }
 
   redacted
+}
+
+fn is_global_token_fragment_match(
+  match_len: usize,
+  min_match_len: usize,
+) -> bool {
+  // Four-character fragments can be common word parts like "auth".
+  match_len >= min_match_len && match_len != 4
 }
 
 fn is_delimited_short_token_fragment(
@@ -817,13 +825,13 @@ mod tests {
   fn docker_login_output_redacts_delimited_short_token_fragments_in_leak_context()
    {
     let redacted = redact_docker_login_token_fragments(
-      "token fragment:a\nsecret suffix:bc\npassword prefix:123\ncredential fragment:\"XY\"\nword:stacktrace\n",
+      "token fragment:a\nsecret suffix:bc\npassword prefix:123\ncredential fragment:\"XY\"\ntoken chunk:abc1\nword:stacktrace\n",
       "abc123XYZ",
     );
 
     assert_eq!(
       redacted,
-      "token fragment:[REDACTED]\nsecret suffix:[REDACTED]\npassword prefix:[REDACTED]\ncredential fragment:\"[REDACTED]\"\nword:stacktrace\n"
+      "token fragment:[REDACTED]\nsecret suffix:[REDACTED]\npassword prefix:[REDACTED]\ncredential fragment:\"[REDACTED]\"\ntoken chunk:[REDACTED]\nword:stacktrace\n"
     );
   }
 
@@ -833,7 +841,7 @@ mod tests {
     assert_eq!(
       redact_docker_login_token_fragments(
         "error: authentication to registry failed",
-        "token",
+        "auth-token",
       ),
       "error: authentication to registry failed"
     );
