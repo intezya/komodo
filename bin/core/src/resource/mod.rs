@@ -322,7 +322,7 @@ pub async fn list_for_user_using_document<T: KomodoResource>(
 /// or regex if wrapped with "\\"
 ///
 /// ## Example
-/// ```
+/// ```rust,ignore
 /// let items = list_full_for_user_using_match_string::<Build>("foo-*", Default::default(), user, all_tags).await?;
 /// let items = list_full_for_user_using_match_string::<Build>("\\^foo-.*$\\", Default::default(), user, all_tags).await?;
 /// ```

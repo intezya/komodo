@@ -93,7 +93,7 @@ impl<States: Default + Busy + Copy + Send + 'static>
   ///
   /// # Example
   ///
-  /// ```rust
+  /// ```rust,ignore
   /// let guard = action_state.update(|state| {
   ///   *state = SomeNewState;
   /// })?;
