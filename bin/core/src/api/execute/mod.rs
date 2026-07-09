@@ -30,7 +30,8 @@ use uuid::Uuid;
 use crate::{
   auth::KomodoAuthImpl,
   helpers::update::{
-    init_execution_update_after_permission_check, update_update,
+    check_execute_permission_before_update, init_execution_update,
+    update_update,
   },
   resource::{KomodoResource, list_full_for_user_using_pattern},
   state::db_client,
@@ -222,14 +223,14 @@ pub fn inner_handler(
   Box::pin(async move {
     let task_id = Uuid::new_v4();
 
+    check_execute_permission_before_update(&request, &user).await?;
+
     // Need to validate no cancel is active before any update is created.
     // This ensures no double update created if Cancel is called more than once for the same request.
     build::validate_cancel_build(&request).await?;
     repo::validate_cancel_repo_build(&request).await?;
 
-    let update =
-      init_execution_update_after_permission_check(&request, &user)
-        .await?;
+    let update = init_execution_update(&request, &user).await?;
 
     // This will be the case for the Batch exections,
     // they don't have their own updates.
@@ -390,4 +391,61 @@ async fn batch_execute<E: BatchExecute>(
     }
   });
   Ok(join_all(futures).await)
+}
+
+#[cfg(test)]
+mod tests {
+  fn inner_handler_body() -> &'static str {
+    let source = include_str!("mod.rs");
+    let start = source
+      .find("pub fn inner_handler")
+      .expect("inner_handler exists");
+    let end = source[start..]
+      .find("async fn task")
+      .expect("task follows inner_handler");
+    &source[start..start + end]
+  }
+
+  #[test]
+  fn cancel_build_preflight_runs_before_cancel_validation() {
+    let body = inner_handler_body();
+    let preflight = body
+      .find("check_execute_permission_before_update")
+      .expect("inner_handler runs permission preflight");
+    let cancel_validation = body
+      .find("build::validate_cancel_build")
+      .expect("inner_handler validates cancel build requests");
+
+    assert!(preflight < cancel_validation);
+  }
+
+  #[test]
+  fn cancel_repo_build_preflight_runs_before_cancel_validation() {
+    let body = inner_handler_body();
+    let preflight = body
+      .find("check_execute_permission_before_update")
+      .expect("inner_handler runs permission preflight");
+    let cancel_validation = body
+      .find("repo::validate_cancel_repo_build")
+      .expect("inner_handler validates cancel repo build requests");
+
+    assert!(preflight < cancel_validation);
+  }
+
+  #[test]
+  fn cancel_validation_still_runs_before_update_insert() {
+    let body = inner_handler_body();
+    let cancel_build = body
+      .find("build::validate_cancel_build")
+      .expect("inner_handler validates cancel build requests");
+    let cancel_repo = body
+      .find("repo::validate_cancel_repo_build")
+      .expect("inner_handler validates cancel repo build requests");
+    let init_update = body
+      .find("init_execution_update(&request, &user)")
+      .expect("inner_handler initializes update");
+
+    assert!(cancel_build < init_update);
+    assert!(cancel_repo < init_update);
+  }
 }

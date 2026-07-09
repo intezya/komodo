@@ -647,6 +647,36 @@ mod tests {
   }
 
   #[tokio::test]
+  async fn failed_admin_preflight_does_not_initialize_update() {
+    let init_calls = Arc::new(AtomicUsize::new(0));
+
+    let err = init_execution_update_after_permission_check_with(
+      &ExecuteRequest::BackupCoreDatabase(BackupCoreDatabase {}),
+      &User::default(),
+      |request, user| {
+        let request = request.clone();
+        let user = user.clone();
+        async move {
+          check_execute_permission_before_update(&request, &user)
+            .await
+        }
+      },
+      {
+        let init_calls = init_calls.clone();
+        |_, _| async move {
+          init_calls.fetch_add(1, Ordering::Relaxed);
+          Ok(Update::default())
+        }
+      },
+    )
+    .await
+    .unwrap_err();
+
+    assert!(err.to_string().contains("admin only"));
+    assert_eq!(init_calls.load(Ordering::Relaxed), 0);
+  }
+
+  #[tokio::test]
   async fn failed_send_alert_preflight_does_not_initialize_update() {
     let init_calls = Arc::new(AtomicUsize::new(0));
 
