@@ -18,8 +18,10 @@ use komodo_client::{
     stack::StackState, swarm::SwarmState, user::User,
   },
 };
+use mogh_error::AddStatusCodeError;
 use mogh_resolver::Resolve;
 use periphery_client::api;
+use reqwest::StatusCode;
 use tokio::sync::Mutex;
 
 use crate::{
@@ -49,11 +51,14 @@ fn clear_repo_cache_lock() -> &'static Mutex<()> {
 
 pub(crate) fn ensure_admin_execution(
   user: &User,
-) -> anyhow::Result<()> {
+) -> mogh_error::Result<()> {
   if user.admin {
     Ok(())
   } else {
-    Err(anyhow!("This method is admin only."))
+    Err(
+      anyhow!("This method is admin only.")
+        .status_code(StatusCode::FORBIDDEN),
+    )
   }
 }
 

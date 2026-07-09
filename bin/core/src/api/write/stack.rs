@@ -1014,7 +1014,10 @@ pub async fn check_stack_for_update_inner(
         }
       }
       Err(e) => {
-        warn!("Failed to auto update Stack {} | {e:#}", stack.name)
+        warn!(
+          "Failed to auto update Stack {} | {:#}",
+          stack.name, e.error
+        )
       }
     }
   };

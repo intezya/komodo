@@ -216,8 +216,9 @@ pub fn inner_handler(
   user: User,
 ) -> Pin<
   Box<
-    dyn std::future::Future<Output = anyhow::Result<ExecutionResult>>
-      + Send,
+    dyn std::future::Future<
+        Output = mogh_error::Result<ExecutionResult>,
+      > + Send,
   >,
 > {
   Box::pin(async move {
@@ -385,7 +386,7 @@ async fn batch_execute<E: BatchExecute>(
         })
         .map_err(|e| BatchExecutionResponseItemErr {
           name: resource.name,
-          error: e.into(),
+          error: e.error.into(),
         })
         .into()
     }

@@ -291,7 +291,7 @@ pub async fn init_execution_update(
 pub async fn check_execute_permission_before_update(
   request: &ExecuteRequest,
   user: &User,
-) -> anyhow::Result<()> {
+) -> mogh_error::Result<()> {
   macro_rules! check_permissions_match {
     (
       resource: [$(($Variant:ident, $ResType:ident, $field:ident)),* $(,)?],
@@ -441,14 +441,14 @@ fn check_system_execute_permission_before_update_with<
   request: ExecuteRequest,
   user: User,
   authorize_send_alert: AuthorizeSendAlert,
-) -> impl std::future::Future<Output = anyhow::Result<()>>
+) -> impl std::future::Future<Output = mogh_error::Result<()>>
 where
   AuthorizeSendAlert: FnOnce(
     komodo_client::api::execute::SendAlert,
     User,
   ) -> AuthorizeSendAlertFuture,
   AuthorizeSendAlertFuture:
-    std::future::Future<Output = anyhow::Result<Vec<Alerter>>>,
+    std::future::Future<Output = mogh_error::Result<Vec<Alerter>>>,
 {
   async move {
     match request {
@@ -472,7 +472,7 @@ where
 async fn check_system_execute_permission_before_update(
   request: ExecuteRequest,
   user: User,
-) -> anyhow::Result<()> {
+) -> mogh_error::Result<()> {
   check_system_execute_permission_before_update_with(
     request,
     user,
@@ -512,7 +512,9 @@ pub async fn init_execution_update_after_permission_check(
   request: &ExecuteRequest,
   user: &User,
 ) -> anyhow::Result<Update> {
-  check_execute_permission_before_update(request, user).await?;
+  check_execute_permission_before_update(request, user)
+    .await
+    .map_err(|e| e.error)?;
   init_execution_update(request, user).await
 }
 
@@ -543,6 +545,8 @@ mod tests {
     GlobalAutoUpdate, RotateAllServerKeys, RotateCoreKeys, SendAlert,
     StartContainer,
   };
+  use mogh_error::AddStatusCodeError;
+  use reqwest::StatusCode;
 
   use super::*;
 
@@ -627,8 +631,22 @@ mod tests {
       .await
       .unwrap_err();
 
-      assert!(err.to_string().contains("admin only"));
+      assert_eq!(err.status, StatusCode::FORBIDDEN);
+      assert!(err.error.to_string().contains("admin only"));
     }
+  }
+
+  #[tokio::test]
+  async fn admin_only_system_execute_preflight_returns_forbidden() {
+    let err = check_execute_permission_before_update(
+      &ExecuteRequest::BackupCoreDatabase(BackupCoreDatabase {}),
+      &User::default(),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(err.status, StatusCode::FORBIDDEN);
+    assert!(err.error.to_string().contains("admin only"));
   }
 
   #[tokio::test]
@@ -659,6 +677,7 @@ mod tests {
         async move {
           check_execute_permission_before_update(&request, &user)
             .await
+            .map_err(|e| e.error)
         }
       },
       {
@@ -674,6 +693,31 @@ mod tests {
 
     assert!(err.to_string().contains("admin only"));
     assert_eq!(init_calls.load(Ordering::Relaxed), 0);
+  }
+
+  #[tokio::test]
+  async fn send_alert_preflight_without_authorized_alerter_returns_bad_request()
+   {
+    let err = check_system_execute_permission_before_update_with(
+      ExecuteRequest::SendAlert(SendAlert {
+        level: Default::default(),
+        message: "test".to_string(),
+        details: String::new(),
+        alerters: vec![String::from("alerter-a")],
+      }),
+      User::default(),
+      |_, _| async {
+        Err(
+          anyhow!("no authorized alerters")
+            .status_code(StatusCode::BAD_REQUEST),
+        )
+      },
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(err.status, StatusCode::BAD_REQUEST);
+    assert!(err.error.to_string().contains("no authorized alerters"));
   }
 
   #[tokio::test]
@@ -695,9 +739,15 @@ mod tests {
           check_system_execute_permission_before_update_with(
             request,
             user,
-            |_, _| async { Err(anyhow!("no authorized alerters")) },
+            |_, _| async {
+              Err(
+                anyhow!("no authorized alerters")
+                  .status_code(StatusCode::BAD_REQUEST),
+              )
+            },
           )
           .await
+          .map_err(|e| e.error)
         }
       },
       {
@@ -737,6 +787,7 @@ mod tests {
             |_, _| async { Ok(vec![Alerter::default()]) },
           )
           .await
+          .map_err(|e| e.error)
         }
       },
       {

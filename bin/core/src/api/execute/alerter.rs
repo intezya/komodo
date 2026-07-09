@@ -13,7 +13,9 @@ use komodo_client::{
     user::User,
   },
 };
+use mogh_error::AddStatusCodeError;
 use mogh_resolver::Resolve;
+use reqwest::StatusCode;
 
 use crate::{
   alert::send_alert_to_alerter, helpers::update::update_update,
@@ -30,7 +32,7 @@ async fn get_authorized_send_alert_alerters_with<
   user: &User,
   alerters: Vec<Alerter>,
   check_execute: CheckExecute,
-) -> anyhow::Result<Vec<Alerter>>
+) -> mogh_error::Result<Vec<Alerter>>
 where
   CheckExecute: Fn(Alerter) -> CheckExecuteFuture,
   CheckExecuteFuture:
@@ -68,7 +70,8 @@ where
   if alerters.is_empty() {
     return Err(anyhow!(
       "Could not find any valid alerters to send to, this required Execute permissions on the Alerter"
-    ));
+    )
+    .status_code(StatusCode::BAD_REQUEST));
   }
 
   Ok(alerters)
@@ -77,7 +80,7 @@ where
 pub(crate) async fn get_authorized_send_alert_alerters(
   send_alert: &SendAlert,
   user: &User,
-) -> anyhow::Result<Vec<Alerter>> {
+) -> mogh_error::Result<Vec<Alerter>> {
   let alerters = list_full_for_user::<Alerter>(
     Default::default(),
     user,
@@ -262,8 +265,10 @@ mod tests {
     .await
     .unwrap_err();
 
+    assert_eq!(err.status, StatusCode::BAD_REQUEST);
     assert!(
       err
+        .error
         .to_string()
         .contains("Could not find any valid alerters")
     );
