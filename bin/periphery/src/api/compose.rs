@@ -3,7 +3,7 @@ use std::{borrow::Cow, fmt::Write, path::PathBuf, time::Duration};
 use anyhow::{Context, anyhow};
 use command::{
   KomodoCommandMode, run_komodo_command_with_sanitization,
-  run_komodo_shell_command_with_timeout, run_komodo_standard_command,
+  run_komodo_standard_command,
   run_komodo_standard_command_with_timeout,
 };
 use formatting::format_serror;
@@ -30,7 +30,7 @@ use tracing::Instrument;
 use crate::{
   config::periphery_config,
   docker::compose::docker_compose,
-  helpers::{format_extra_args, format_log_grep},
+  helpers::{filter_log_search_log, format_extra_args},
   stack::{
     maybe_login_registry, pull_or_clone_stack, validate_files,
     write::write_stack,
@@ -86,25 +86,23 @@ impl Resolve<crate::api::Args> for GetComposeLogSearch {
       timestamps,
     } = self;
     let docker_compose = docker_compose();
-    let grep = format_log_grep(&terms, combinator, invert);
     let timestamps = if timestamps {
       " --timestamps"
     } else {
       Default::default()
     };
     let command = format!(
-      "{docker_compose} -p {project} logs --tail 5000{timestamps} {} 2>&1 | {grep}",
+      "{docker_compose} -p {project} logs --tail 5000{timestamps} {}",
       services.join(" ")
     );
-    Ok(
-      run_komodo_shell_command_with_timeout(
-        "Search Stack Log",
-        None,
-        command,
-        LOG_COMMAND_TIMEOUT,
-      )
-      .await,
+    let log = run_komodo_standard_command_with_timeout(
+      "Search Stack Log",
+      None,
+      command,
+      LOG_COMMAND_TIMEOUT,
     )
+    .await;
+    Ok(filter_log_search_log(log, &terms, combinator, invert))
   }
 }
 

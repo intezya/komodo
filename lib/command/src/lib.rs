@@ -280,7 +280,35 @@ async fn run_command_output(
 mod tests {
   use std::time::Duration;
 
-  use super::run_shell_command_with_timeout;
+  use super::{
+    run_shell_command_with_timeout, run_standard_command_with_timeout,
+  };
+
+  #[tokio::test]
+  async fn standard_command_timeout_returns_failure() {
+    let out = run_standard_command_with_timeout(
+      "sleep 2",
+      None,
+      Duration::from_millis(100),
+    )
+    .await;
+
+    assert!(!out.success());
+    assert!(out.stderr.contains("Command timed out"));
+  }
+
+  #[tokio::test]
+  async fn standard_command_before_timeout_returns_success() {
+    let out = run_standard_command_with_timeout(
+      "printf ok",
+      None,
+      Duration::from_secs(5),
+    )
+    .await;
+
+    assert!(out.success());
+    assert_eq!(out.stdout, "ok");
+  }
 
   #[tokio::test]
   async fn shell_command_timeout_returns_failure() {

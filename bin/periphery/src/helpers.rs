@@ -1,6 +1,6 @@
 use std::{
-  fmt::Write, net::IpAddr, path::PathBuf, str::FromStr as _,
-  sync::OnceLock, time::Duration,
+  borrow::Cow, fmt::Write, net::IpAddr, path::PathBuf,
+  str::FromStr as _, sync::OnceLock, time::Duration,
 };
 
 use anyhow::Context;
@@ -14,11 +14,12 @@ use komodo_client::{
   entities::{
     EnvironmentVar, RepoExecutionArgs, RepoExecutionResponse,
     SearchCombinator, SystemCommand, all_logs_success,
-    deployment::Conversion,
+    deployment::Conversion, update::Log,
   },
   parsers::QUOTE_PATTERN,
 };
 use periphery_client::api::git::PeripheryRepoExecutionResponse;
+use regex::Regex;
 
 use crate::config::periphery_config;
 
@@ -129,6 +130,161 @@ pub fn format_log_grep(
         terms.join(")(?=.*")
       )
     }
+  }
+}
+
+pub fn filter_log_search_log(
+  mut log: Log,
+  terms: &[String],
+  combinator: SearchCombinator,
+  invert: bool,
+) -> Log {
+  if !log.success {
+    return log;
+  }
+
+  match filter_log_output(
+    &log.stdout,
+    &log.stderr,
+    terms,
+    combinator,
+    invert,
+  ) {
+    Ok(Some(stdout)) => {
+      log.stdout = stdout;
+      log.stderr.clear();
+    }
+    Ok(None) => {
+      log.stdout.clear();
+      log.stderr.clear();
+      log.success = false;
+    }
+    Err(error) => {
+      log.stdout.clear();
+      log.stderr = error.to_string();
+      log.success = false;
+    }
+  }
+
+  log
+}
+
+fn filter_log_output(
+  stdout: &str,
+  stderr: &str,
+  terms: &[String],
+  combinator: SearchCombinator,
+  invert: bool,
+) -> Result<Option<String>, regex::Error> {
+  let output = combine_log_output(stdout, stderr);
+  filter_log_content(&output, terms, combinator, invert)
+}
+
+fn combine_log_output<'a>(
+  stdout: &'a str,
+  stderr: &'a str,
+) -> Cow<'a, str> {
+  match (stdout.is_empty(), stderr.is_empty()) {
+    (false, false) => Cow::Owned(format!("{stdout}\n{stderr}")),
+    (false, true) => Cow::Borrowed(stdout),
+    (true, false) => Cow::Borrowed(stderr),
+    (true, true) => Cow::Borrowed(""),
+  }
+}
+
+fn filter_log_content(
+  output: &str,
+  terms: &[String],
+  combinator: SearchCombinator,
+  invert: bool,
+) -> Result<Option<String>, regex::Error> {
+  let matchers = terms
+    .iter()
+    .map(|term| Regex::new(term))
+    .collect::<Result<Vec<_>, _>>()?;
+
+  let filtered = output
+    .lines()
+    .filter(|line| {
+      let matched = if matchers.is_empty() {
+        true
+      } else {
+        match combinator {
+          SearchCombinator::Or => {
+            matchers.iter().any(|matcher| matcher.is_match(line))
+          }
+          SearchCombinator::And => {
+            matchers.iter().all(|matcher| matcher.is_match(line))
+          }
+        }
+      };
+      matched != invert
+    })
+    .collect::<Vec<_>>();
+
+  if filtered.is_empty() {
+    Ok(None)
+  } else {
+    Ok(Some(filtered.join("\n")))
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use komodo_client::entities::SearchCombinator;
+
+  use super::filter_log_content;
+
+  #[test]
+  fn filter_log_content_matches_any_term_for_or_searches() {
+    let filtered = filter_log_content(
+      "alpha\nbeta\ngamma",
+      &["alpha".into(), "gamma".into()],
+      SearchCombinator::Or,
+      false,
+    )
+    .unwrap();
+
+    assert_eq!(filtered.as_deref(), Some("alpha\ngamma"));
+  }
+
+  #[test]
+  fn filter_log_content_requires_all_terms_for_and_searches() {
+    let filtered = filter_log_content(
+      "alpha beta\nalpha\ngamma beta",
+      &["alpha".into(), "beta".into()],
+      SearchCombinator::And,
+      false,
+    )
+    .unwrap();
+
+    assert_eq!(filtered.as_deref(), Some("alpha beta"));
+  }
+
+  #[test]
+  fn filter_log_content_inverts_matches() {
+    let filtered = filter_log_content(
+      "alpha\nbeta\ngamma",
+      &["alpha".into()],
+      SearchCombinator::Or,
+      true,
+    )
+    .unwrap();
+
+    assert_eq!(filtered.as_deref(), Some("beta\ngamma"));
+  }
+
+  #[test]
+  fn filter_log_content_returns_none_when_no_lines_match() {
+    let filtered = filter_log_content(
+      "alpha\nbeta",
+      &["gamma".into()],
+      SearchCombinator::Or,
+      false,
+    )
+    .unwrap();
+
+    assert_eq!(filtered, None);
   }
 }
 
