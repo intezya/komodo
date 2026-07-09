@@ -663,6 +663,7 @@ mod tests {
     time::{Duration, Instant},
   };
 
+  use anyhow::anyhow;
   use periphery_client::transport::LoginMessage;
   use tokio::time::timeout;
 
@@ -695,34 +696,113 @@ mod tests {
     assert!(!connection.should_reject_duplicate_connection());
   }
 
-  #[test]
-  fn replacement_candidate_keeps_existing_connection_active_until_publish()
-   {
-    let (connection, _receiver) =
-      PeripheryConnection::new(test_args("server-1"));
-
-    let (_replacement, _replacement_receiver) =
-      connection.with_new_args(test_args("server-1"));
-
-    assert!(
-      !connection.cancel.is_cancelled(),
-      "creating a replacement candidate must not evict the published connection before auth succeeds"
-    );
-  }
-
   #[tokio::test]
-  async fn published_replacement_routes_new_messages_only_to_replacement()
-   {
+  async fn prepare_does_not_replace_active_existing_connection() {
     let connections = PeripheryConnections::default();
     let server_id = String::from("server-1");
 
     let (old_connection, mut old_receiver) = connections
-      .insert(server_id.clone(), test_args("server-1"))
+      .prepare(server_id.clone(), test_args("server-1"))
+      .await;
+    connections
+      .publish(server_id.clone(), old_connection.clone())
+      .await;
+    old_connection.set_connected(true);
+
+    let (candidate, mut candidate_receiver) = connections
+      .prepare(server_id.clone(), test_args("server-1"))
+      .await;
+
+    let current = connections.get(&server_id).await.unwrap();
+    assert!(Arc::ptr_eq(&current, &old_connection));
+    assert!(!Arc::ptr_eq(&current, &candidate));
+    assert!(
+      !old_connection.cancel.is_cancelled(),
+      "creating a replacement candidate must not evict the published connection before auth succeeds"
+    );
+
+    current
+      .sender
+      .send_message(LoginMessage::Success)
+      .await
+      .unwrap();
+
+    timeout(Duration::from_millis(100), old_receiver.recv())
+      .await
+      .expect("old connection should remain routed after prepare")
+      .unwrap();
+
+    assert!(
+      timeout(Duration::from_millis(100), candidate_receiver.recv())
+        .await
+        .is_err(),
+      "unpublished replacement candidate should not receive routed messages"
+    );
+  }
+
+  #[tokio::test]
+  async fn failed_auth_without_publish_leaves_old_connection_routed()
+  {
+    let connections = PeripheryConnections::default();
+    let server_id = String::from("server-1");
+
+    let (old_connection, mut old_receiver) = connections
+      .prepare(server_id.clone(), test_args("server-1"))
+      .await;
+    connections
+      .publish(server_id.clone(), old_connection.clone())
+      .await;
+    old_connection.set_connected(true);
+
+    let (candidate, mut candidate_receiver) = connections
+      .prepare(server_id.clone(), test_args("server-1"))
+      .await;
+    candidate.set_error(anyhow!("auth failed")).await;
+
+    let current = connections.get(&server_id).await.unwrap();
+    assert!(Arc::ptr_eq(&current, &old_connection));
+    assert!(!old_connection.cancel.is_cancelled());
+    assert!(old_connection.connected());
+
+    current
+      .sender
+      .send_message(LoginMessage::Success)
+      .await
+      .unwrap();
+
+    timeout(Duration::from_millis(100), old_receiver.recv())
+      .await
+      .expect(
+        "old connection should remain routed when auth fails before publish",
+      )
+      .unwrap();
+
+    assert!(
+      timeout(Duration::from_millis(100), candidate_receiver.recv())
+        .await
+        .is_err(),
+      "failed unpublished replacement should not receive routed messages"
+    );
+  }
+
+  #[tokio::test]
+  async fn prepare_then_publish_routes_new_messages_to_replacement() {
+    let connections = PeripheryConnections::default();
+    let server_id = String::from("server-1");
+
+    let (old_connection, mut old_receiver) = connections
+      .prepare(server_id.clone(), test_args("server-1"))
+      .await;
+    connections
+      .publish(server_id.clone(), old_connection.clone())
       .await;
     old_connection.set_connected(true);
 
     let (replacement, mut replacement_receiver) = connections
-      .insert(server_id.clone(), test_args("server-1"))
+      .prepare(server_id.clone(), test_args("server-1"))
+      .await;
+    connections
+      .publish(server_id.clone(), replacement.clone())
       .await;
 
     assert!(old_connection.cancel.is_cancelled());
