@@ -76,9 +76,9 @@ pub async fn handler(
     Some(server) => {
       let connections = periphery_connections();
 
-      // Ensure connected server can't get bumped off the connection.
+      // Reject healthy duplicates, but let stale entries be replaced.
       if let Some(existing_connection) = connections.get(&server.id).await
-        && existing_connection.connected()
+        && existing_connection.should_reject_duplicate_connection()
       {
         return Err(
           anyhow!("A Server '{server_query}' is already connected")
@@ -109,14 +109,15 @@ async fn existing_server_handler(
   identifiers: HeaderConnectionIdentifiers,
   ws: WebSocketUpgrade,
 ) -> mogh_error::Result<Response> {
-  let (connection, mut receiver) = periphery_connections()
-    .insert(
+  let connections = periphery_connections();
+  let (connection, mut receiver) = connections
+    .prepare(
       server.id.clone(),
       PeripheryConnectionArgs::from_server(&server),
     )
     .await;
 
-  Ok(ws.on_upgrade(|socket| async move {
+  Ok(ws.on_upgrade(move |socket| async move {
     let query =
       format!("server={}", urlencoding::encode(&server_query));
     let mut socket = AxumWebsocket(socket);
@@ -201,6 +202,10 @@ async fn existing_server_handler(
 
       return;
     }
+
+    connections
+      .publish(server.id.clone(), connection.clone())
+      .await;
 
     // Waits until after connection is handled then
     // force refreshes the server cache.
