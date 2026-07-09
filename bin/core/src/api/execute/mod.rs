@@ -29,7 +29,9 @@ use uuid::Uuid;
 
 use crate::{
   auth::KomodoAuthImpl,
-  helpers::update::{init_execution_update, update_update},
+  helpers::update::{
+    init_execution_update_after_permission_check, update_update,
+  },
   resource::{KomodoResource, list_full_for_user_using_pattern},
   state::db_client,
 };
@@ -225,7 +227,9 @@ pub fn inner_handler(
     build::validate_cancel_build(&request).await?;
     repo::validate_cancel_repo_build(&request).await?;
 
-    let update = init_execution_update(&request, &user).await?;
+    let update =
+      init_execution_update_after_permission_check(&request, &user)
+        .await?;
 
     // This will be the case for the Batch exections,
     // they don't have their own updates.
