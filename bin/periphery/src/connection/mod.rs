@@ -185,3 +185,77 @@ fn handle_request(
     }
   });
 }
+
+#[cfg(test)]
+mod tests {
+  use super::client::{
+    OutboundFailurePhase, OutboundRetryLogDecision,
+    OutboundRetryTracker, classify_login_failure_phase,
+  };
+
+  #[test]
+  fn outbound_retry_continues_after_handshake_or_login_failure() {
+    let mut tracker = OutboundRetryTracker::default();
+    let handshake_timeout =
+      anyhow::anyhow!("Timed out waiting for message.")
+        .context("[Client] Failed to get handshake_m2");
+
+    let first_handshake = tracker.record_failure(
+      classify_login_failure_phase(&handshake_timeout),
+      &handshake_timeout,
+    );
+    assert_eq!(
+      first_handshake.phase,
+      OutboundFailurePhase::Handshake
+    );
+    assert_eq!(first_handshake.attempt, 1);
+    assert!(matches!(
+      first_handshake.log_decision,
+      Some(OutboundRetryLogDecision::FirstFailure)
+    ));
+
+    let second_handshake = tracker.record_failure(
+      classify_login_failure_phase(&handshake_timeout),
+      &handshake_timeout,
+    );
+    assert_eq!(
+      second_handshake.phase,
+      OutboundFailurePhase::Handshake
+    );
+    assert_eq!(second_handshake.attempt, 2);
+    assert!(second_handshake.log_decision.is_none());
+
+    let login_error = anyhow::anyhow!("Login rejected by Core");
+    let first_login = tracker.record_failure(
+      classify_login_failure_phase(&login_error),
+      &login_error,
+    );
+    assert_eq!(first_login.phase, OutboundFailurePhase::Login);
+    assert_eq!(first_login.attempt, 1);
+    assert!(matches!(
+      first_login.log_decision,
+      Some(OutboundRetryLogDecision::FirstFailure)
+    ));
+
+    let second_login = tracker.record_failure(
+      classify_login_failure_phase(&login_error),
+      &login_error,
+    );
+    assert_eq!(second_login.phase, OutboundFailurePhase::Login);
+    assert_eq!(second_login.attempt, 2);
+    assert!(second_login.log_decision.is_none());
+
+    tracker.reset();
+
+    let after_reset = tracker.record_failure(
+      classify_login_failure_phase(&login_error),
+      &login_error,
+    );
+    assert_eq!(after_reset.phase, OutboundFailurePhase::Login);
+    assert_eq!(after_reset.attempt, 1);
+    assert!(matches!(
+      after_reset.log_decision,
+      Some(OutboundRetryLogDecision::FirstFailure)
+    ));
+  }
+}

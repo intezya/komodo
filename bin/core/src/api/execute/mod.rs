@@ -49,6 +49,9 @@ mod stack;
 mod swarm;
 mod sync;
 
+#[cfg(test)]
+pub(crate) use stack::deploy_update_success;
+
 use super::Variant;
 
 pub struct ExecuteArgs {

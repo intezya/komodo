@@ -56,8 +56,7 @@ impl ExtractBranch for Github {
   fn extract_branch(body: &str) -> anyhow::Result<String> {
     let branch = serde_json::from_str::<GithubWebhookBody>(body)
       .context("Failed to parse github request body")?
-      .branch
-      .replace("refs/heads/", "");
-    Ok(branch)
+      .branch;
+    Ok(super::super::normalize_branch(&branch).to_string())
   }
 }

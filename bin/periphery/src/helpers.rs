@@ -6,7 +6,7 @@ use std::{
 use anyhow::Context;
 use command::{
   KomodoCommandMode, run_komodo_command_with_sanitization,
-  run_standard_command,
+  run_komodo_shell_command_with_timeout, run_standard_command,
 };
 use environment::write_env_file;
 use interpolate::Interpolator;
@@ -14,11 +14,12 @@ use komodo_client::{
   entities::{
     EnvironmentVar, RepoExecutionArgs, RepoExecutionResponse,
     SearchCombinator, SystemCommand, all_logs_success,
-    deployment::Conversion,
+    deployment::Conversion, update::Log,
   },
   parsers::QUOTE_PATTERN,
 };
 use periphery_client::api::git::PeripheryRepoExecutionResponse;
+use regex::Regex;
 
 use crate::config::periphery_config;
 
@@ -113,22 +114,241 @@ pub fn push_environment(
   Ok(())
 }
 
-pub fn format_log_grep(
+#[cfg(test)]
+pub fn filter_log_search_log(
+  log: Log,
   terms: &[String],
   combinator: SearchCombinator,
   invert: bool,
-) -> String {
-  let maybe_invert = if invert { " -v" } else { Default::default() };
-  match combinator {
-    SearchCombinator::Or => {
-      format!("grep{maybe_invert} -E '{}'", terms.join("|"))
+) -> Log {
+  let output =
+    combine_log_output(&log.stdout, &log.stderr).into_owned();
+  filter_log_search_output(log, terms, combinator, invert, &output)
+}
+
+pub async fn run_log_search_command_with_timeout(
+  stage: &str,
+  command: impl Into<String>,
+  timeout: Duration,
+  terms: &[String],
+  combinator: SearchCombinator,
+  invert: bool,
+) -> Log {
+  let command = format!("({}) 2>&1", command.into());
+  let mut log = run_komodo_shell_command_with_timeout(
+    stage, None, command, timeout,
+  )
+  .await;
+  if !log.success {
+    return log;
+  }
+
+  let output = std::mem::take(&mut log.stdout);
+  filter_log_search_output(log, terms, combinator, invert, &output)
+}
+
+pub fn filter_log_search_output(
+  mut log: Log,
+  terms: &[String],
+  combinator: SearchCombinator,
+  invert: bool,
+  output: &str,
+) -> Log {
+  if !log.success {
+    return log;
+  }
+
+  match filter_log_content(output, terms, combinator, invert) {
+    Ok(Some(stdout)) => {
+      log.stdout = stdout;
+      log.stderr.clear();
     }
-    SearchCombinator::And => {
-      format!(
-        "grep{maybe_invert} -P '^(?=.*{})'",
-        terms.join(")(?=.*")
-      )
+    Ok(None) => {
+      log.stdout.clear();
+      log.stderr.clear();
+      log.success = false;
     }
+    Err(error) => {
+      log.stdout.clear();
+      log.stderr = error.to_string();
+      log.success = false;
+    }
+  }
+
+  log
+}
+
+#[cfg(test)]
+fn combine_log_output<'a>(
+  stdout: &'a str,
+  stderr: &'a str,
+) -> std::borrow::Cow<'a, str> {
+  match (stdout.is_empty(), stderr.is_empty()) {
+    (false, false) => {
+      std::borrow::Cow::Owned(format!("{stdout}\n{stderr}"))
+    }
+    (false, true) => std::borrow::Cow::Borrowed(stdout),
+    (true, false) => std::borrow::Cow::Borrowed(stderr),
+    (true, true) => std::borrow::Cow::Borrowed(""),
+  }
+}
+
+fn filter_log_content(
+  output: &str,
+  terms: &[String],
+  combinator: SearchCombinator,
+  invert: bool,
+) -> Result<Option<String>, regex::Error> {
+  let matchers = terms
+    .iter()
+    .map(|term| Regex::new(term))
+    .collect::<Result<Vec<_>, _>>()?;
+
+  let filtered = output
+    .lines()
+    .filter(|line| {
+      let matched = if matchers.is_empty() {
+        true
+      } else {
+        match combinator {
+          SearchCombinator::Or => {
+            matchers.iter().any(|matcher| matcher.is_match(line))
+          }
+          SearchCombinator::And => {
+            matchers.iter().all(|matcher| matcher.is_match(line))
+          }
+        }
+      };
+      matched != invert
+    })
+    .collect::<Vec<_>>();
+
+  if filtered.is_empty() {
+    Ok(None)
+  } else {
+    Ok(Some(filtered.join("\n")))
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use std::time::Duration;
+
+  use komodo_client::entities::{SearchCombinator, update::Log};
+
+  use super::{
+    filter_log_content, filter_log_search_log,
+    run_log_search_command_with_timeout,
+  };
+
+  #[test]
+  fn filter_log_content_matches_any_term_for_or_searches() {
+    let filtered = filter_log_content(
+      "alpha\nbeta\ngamma",
+      &["alpha".into(), "gamma".into()],
+      SearchCombinator::Or,
+      false,
+    )
+    .unwrap();
+
+    assert_eq!(filtered.as_deref(), Some("alpha\ngamma"));
+  }
+
+  #[test]
+  fn filter_log_content_requires_all_terms_for_and_searches() {
+    let filtered = filter_log_content(
+      "alpha beta\nalpha\ngamma beta",
+      &["alpha".into(), "beta".into()],
+      SearchCombinator::And,
+      false,
+    )
+    .unwrap();
+
+    assert_eq!(filtered.as_deref(), Some("alpha beta"));
+  }
+
+  #[test]
+  fn filter_log_content_inverts_matches() {
+    let filtered = filter_log_content(
+      "alpha\nbeta\ngamma",
+      &["alpha".into()],
+      SearchCombinator::Or,
+      true,
+    )
+    .unwrap();
+
+    assert_eq!(filtered.as_deref(), Some("beta\ngamma"));
+  }
+
+  #[test]
+  fn filter_log_content_returns_none_when_no_lines_match() {
+    let filtered = filter_log_content(
+      "alpha\nbeta",
+      &["gamma".into()],
+      SearchCombinator::Or,
+      false,
+    )
+    .unwrap();
+
+    assert_eq!(filtered, None);
+  }
+
+  #[test]
+  fn filter_log_search_log_searches_stdout_and_stderr() {
+    let filtered = filter_log_search_log(
+      Log {
+        stdout: "stdout-match\nstdout-skip".into(),
+        stderr: "stderr-match".into(),
+        success: true,
+        ..Default::default()
+      },
+      &["match".into()],
+      SearchCombinator::Or,
+      false,
+    );
+
+    assert!(filtered.success);
+    assert_eq!(filtered.stdout, "stdout-match\nstderr-match");
+    assert!(filtered.stderr.is_empty());
+  }
+
+  #[test]
+  fn filter_log_search_log_marks_no_matches_as_unsuccessful() {
+    let filtered = filter_log_search_log(
+      Log {
+        stdout: "alpha".into(),
+        stderr: "beta".into(),
+        success: true,
+        ..Default::default()
+      },
+      &["gamma".into()],
+      SearchCombinator::Or,
+      false,
+    );
+
+    assert!(!filtered.success);
+    assert!(filtered.stdout.is_empty());
+    assert!(filtered.stderr.is_empty());
+  }
+
+  #[tokio::test]
+  async fn run_log_search_command_preserves_merged_stream_order() {
+    let filtered = run_log_search_command_with_timeout(
+      "Search Log",
+      "sh -lc 'echo stdout-match-1; sleep 0.05; echo stderr-match-1 >&2; sleep 0.05; echo stdout-match-2; sleep 0.05; echo stderr-skip >&2'",
+      Duration::from_secs(5),
+      &["match".into()],
+      SearchCombinator::Or,
+      false,
+    )
+    .await;
+
+    assert!(filtered.success);
+    assert_eq!(
+      filtered.stdout,
+      "stdout-match-1\nstderr-match-1\nstdout-match-2"
+    );
+    assert!(filtered.stderr.is_empty());
   }
 }
 
