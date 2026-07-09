@@ -3,6 +3,7 @@ use std::time::Duration;
 use anyhow::Context;
 use command::{
   run_komodo_shell_command, run_komodo_standard_command,
+  run_komodo_standard_command_with_merged_output_with_timeout,
   run_komodo_standard_command_with_timeout,
 };
 use futures_util::future::join_all;
@@ -18,7 +19,7 @@ use periphery_client::api::container::*;
 
 use crate::{
   docker::{stats::get_container_stats, stop_container_command},
-  helpers::filter_log_search_log,
+  helpers::filter_log_search_output,
   state::docker_client,
 };
 
@@ -98,14 +99,17 @@ impl Resolve<crate::api::Args> for GetContainerLogSearch {
     };
     let command =
       format!("docker logs {name} --tail 5000{timestamps}");
-    let log = run_komodo_standard_command_with_timeout(
-      "Get container log grep",
-      None,
-      command,
-      LOG_COMMAND_TIMEOUT,
-    )
-    .await;
-    Ok(filter_log_search_log(log, &terms, combinator, invert))
+    let (log, output) =
+      run_komodo_standard_command_with_merged_output_with_timeout(
+        "Get container log grep",
+        None,
+        command,
+        LOG_COMMAND_TIMEOUT,
+      )
+      .await;
+    Ok(filter_log_search_output(
+      log, &terms, combinator, invert, &output,
+    ))
   }
 }
 

@@ -4,6 +4,7 @@ use anyhow::{Context, anyhow};
 use command::{
   KomodoCommandMode, run_komodo_command_with_sanitization,
   run_komodo_standard_command,
+  run_komodo_standard_command_with_merged_output_with_timeout,
   run_komodo_standard_command_with_timeout,
 };
 use formatting::format_serror;
@@ -30,7 +31,7 @@ use tracing::Instrument;
 use crate::{
   config::periphery_config,
   docker::compose::docker_compose,
-  helpers::{filter_log_search_log, format_extra_args},
+  helpers::{filter_log_search_output, format_extra_args},
   stack::{
     maybe_login_registry, pull_or_clone_stack, validate_files,
     write::write_stack,
@@ -95,14 +96,17 @@ impl Resolve<crate::api::Args> for GetComposeLogSearch {
       "{docker_compose} -p {project} logs --tail 5000{timestamps} {}",
       services.join(" ")
     );
-    let log = run_komodo_standard_command_with_timeout(
-      "Search Stack Log",
-      None,
-      command,
-      LOG_COMMAND_TIMEOUT,
-    )
-    .await;
-    Ok(filter_log_search_log(log, &terms, combinator, invert))
+    let (log, output) =
+      run_komodo_standard_command_with_merged_output_with_timeout(
+        "Search Stack Log",
+        None,
+        command,
+        LOG_COMMAND_TIMEOUT,
+      )
+      .await;
+    Ok(filter_log_search_output(
+      log, &terms, combinator, invert, &output,
+    ))
   }
 }
 

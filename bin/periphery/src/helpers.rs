@@ -134,22 +134,28 @@ pub fn format_log_grep(
 }
 
 pub fn filter_log_search_log(
+  log: Log,
+  terms: &[String],
+  combinator: SearchCombinator,
+  invert: bool,
+) -> Log {
+  let output =
+    combine_log_output(&log.stdout, &log.stderr).into_owned();
+  filter_log_search_output(log, terms, combinator, invert, &output)
+}
+
+pub fn filter_log_search_output(
   mut log: Log,
   terms: &[String],
   combinator: SearchCombinator,
   invert: bool,
+  output: &str,
 ) -> Log {
   if !log.success {
     return log;
   }
 
-  match filter_log_output(
-    &log.stdout,
-    &log.stderr,
-    terms,
-    combinator,
-    invert,
-  ) {
+  match filter_log_content(output, terms, combinator, invert) {
     Ok(Some(stdout)) => {
       log.stdout = stdout;
       log.stderr.clear();
@@ -167,17 +173,6 @@ pub fn filter_log_search_log(
   }
 
   log
-}
-
-fn filter_log_output(
-  stdout: &str,
-  stderr: &str,
-  terms: &[String],
-  combinator: SearchCombinator,
-  invert: bool,
-) -> Result<Option<String>, regex::Error> {
-  let output = combine_log_output(stdout, stderr);
-  filter_log_content(&output, terms, combinator, invert)
 }
 
 fn combine_log_output<'a>(
@@ -231,9 +226,9 @@ fn filter_log_content(
 
 #[cfg(test)]
 mod tests {
-  use komodo_client::entities::SearchCombinator;
+  use komodo_client::entities::{SearchCombinator, update::Log};
 
-  use super::filter_log_content;
+  use super::{filter_log_content, filter_log_search_log};
 
   #[test]
   fn filter_log_content_matches_any_term_for_or_searches() {
@@ -285,6 +280,44 @@ mod tests {
     .unwrap();
 
     assert_eq!(filtered, None);
+  }
+
+  #[test]
+  fn filter_log_search_log_searches_stdout_and_stderr() {
+    let filtered = filter_log_search_log(
+      Log {
+        stdout: "stdout-match\nstdout-skip".into(),
+        stderr: "stderr-match".into(),
+        success: true,
+        ..Default::default()
+      },
+      &["match".into()],
+      SearchCombinator::Or,
+      false,
+    );
+
+    assert!(filtered.success);
+    assert_eq!(filtered.stdout, "stdout-match\nstderr-match");
+    assert!(filtered.stderr.is_empty());
+  }
+
+  #[test]
+  fn filter_log_search_log_marks_no_matches_as_unsuccessful() {
+    let filtered = filter_log_search_log(
+      Log {
+        stdout: "alpha".into(),
+        stderr: "beta".into(),
+        success: true,
+        ..Default::default()
+      },
+      &["gamma".into()],
+      SearchCombinator::Or,
+      false,
+    );
+
+    assert!(!filtered.success);
+    assert!(filtered.stdout.is_empty());
+    assert!(filtered.stderr.is_empty());
   }
 }
 
