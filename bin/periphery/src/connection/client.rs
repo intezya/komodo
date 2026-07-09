@@ -27,7 +27,7 @@ use crate::{
 const RETRY_LOG_EVERY: usize = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OutboundFailurePhase {
+pub(super) enum OutboundFailurePhase {
   Connect,
   OnboardingFlow,
   Handshake,
@@ -48,26 +48,26 @@ impl OutboundFailurePhase {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OutboundRetryLogDecision {
+pub(super) enum OutboundRetryLogDecision {
   FirstFailure,
   StillFailing,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct OutboundRetryEvent {
-  phase: OutboundFailurePhase,
-  attempt: usize,
-  log_decision: Option<OutboundRetryLogDecision>,
+pub(super) struct OutboundRetryEvent {
+  pub(super) phase: OutboundFailurePhase,
+  pub(super) attempt: usize,
+  pub(super) log_decision: Option<OutboundRetryLogDecision>,
 }
 
 #[derive(Default)]
-struct OutboundRetryTracker {
+pub(super) struct OutboundRetryTracker {
   phase: Option<OutboundFailurePhase>,
   attempt: usize,
 }
 
 impl OutboundRetryTracker {
-  fn record_failure(
+  pub(super) fn record_failure(
     &mut self,
     phase: OutboundFailurePhase,
     error: &anyhow::Error,
@@ -106,13 +106,13 @@ impl OutboundRetryTracker {
     }
   }
 
-  fn reset(&mut self) {
+  pub(super) fn reset(&mut self) {
     self.phase = None;
     self.attempt = 0;
   }
 }
 
-fn classify_login_failure_phase(
+pub(super) fn classify_login_failure_phase(
   error: &anyhow::Error,
 ) -> OutboundFailurePhase {
   if error.chain().any(|cause| {
@@ -309,51 +309,4 @@ async fn connect_websocket(
       StatusCode::UNAUTHORIZED => anyhow!("401 Unauthorized: Only one Server connected as '{}' is allowed. Or the Core reverse proxy needs to forward host and websocket headers.", config.connect_as),
       _ => e.error,
     })
-}
-
-#[cfg(test)]
-mod tests {
-  use super::{
-    OutboundFailurePhase, OutboundRetryLogDecision,
-    OutboundRetryTracker, classify_login_failure_phase,
-  };
-
-  #[test]
-  fn outbound_reconnect_keeps_retrying_after_login_timeout() {
-    let mut tracker = OutboundRetryTracker::default();
-    let timeout = anyhow::anyhow!("Timed out waiting for message.")
-      .context("[Client] Failed to get handshake_m2");
-
-    let first = tracker.record_failure(
-      classify_login_failure_phase(&timeout),
-      &timeout,
-    );
-    assert_eq!(first.phase, OutboundFailurePhase::Handshake);
-    assert_eq!(first.attempt, 1);
-    assert!(matches!(
-      first.log_decision,
-      Some(OutboundRetryLogDecision::FirstFailure)
-    ));
-
-    let second = tracker.record_failure(
-      classify_login_failure_phase(&timeout),
-      &timeout,
-    );
-    assert_eq!(second.phase, OutboundFailurePhase::Handshake);
-    assert_eq!(second.attempt, 2);
-    assert!(second.log_decision.is_none());
-
-    tracker.reset();
-
-    let next = tracker.record_failure(
-      classify_login_failure_phase(&timeout),
-      &timeout,
-    );
-    assert_eq!(next.phase, OutboundFailurePhase::Handshake);
-    assert_eq!(next.attempt, 1);
-    assert!(matches!(
-      next.log_decision,
-      Some(OutboundRetryLogDecision::FirstFailure)
-    ));
-  }
 }
