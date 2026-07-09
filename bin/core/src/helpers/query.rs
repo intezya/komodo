@@ -1,4 +1,7 @@
-use std::{collections::HashMap, str::FromStr};
+use std::{
+  collections::{HashMap, HashSet},
+  str::FromStr,
+};
 
 use anyhow::{Context, anyhow};
 use database::mungos::{
@@ -448,6 +451,37 @@ pub async fn get_variables_and_secrets()
   Ok(VariablesAndSecrets { variables, secrets })
 }
 
+pub fn stack_display_secret_replacers(
+  secrets: &HashMap<String, String>,
+) -> Vec<(String, String)> {
+  let mut seen = HashSet::new();
+  let mut replacers = secrets
+    .iter()
+    .filter_map(|(name, value)| {
+      if value.is_empty() || !seen.insert(value.clone()) {
+        return None;
+      }
+      Some((value.clone(), format!("[[{name}]]")))
+    })
+    .collect::<Vec<_>>();
+
+  replacers.sort_by(|(left, _), (right, _)| {
+    right.len().cmp(&left.len()).then_with(|| left.cmp(right))
+  });
+
+  replacers
+}
+
+pub fn redact_stack_display_secrets(
+  input: &str,
+  replacers: &[(String, String)],
+) -> String {
+  if replacers.is_empty() {
+    return input.to_string();
+  }
+  svi::replace_in_string(input, replacers)
+}
+
 /// Get last time procedure / action was run using Update query.
 /// Ignored whether run was successful.
 pub async fn get_last_run_at<R: KomodoResource>(
@@ -784,5 +818,18 @@ mod tests {
       get_stack_state_from_containers(&[], &services, &containers);
 
     assert_eq!(state, StackState::Unhealthy);
+  }
+
+  #[test]
+  fn redacts_secret_values_with_shell_special_chars() {
+    let input = "MY_OTHER_SECRET='abc$def'\nMY_PUBLIC=value";
+    let replacers =
+      vec![("abc$def".to_string(), "[[SECRET]]".to_string())];
+
+    let output = redact_stack_display_secrets(input, &replacers);
+
+    assert!(!output.contains("abc$def"));
+    assert!(output.contains("[[SECRET]]"));
+    assert!(output.contains("MY_PUBLIC=value"));
   }
 }

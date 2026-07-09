@@ -168,12 +168,12 @@ impl Resolve<ExecuteArgs> for DeployStack {
       || format!("Failed to get registry token in call to db. Stopping run. | {} | {}", stack.config.registry_provider, stack.config.registry_account),
     )?;
 
+    let VariablesAndSecrets { variables, secrets } =
+      get_variables_and_secrets().await?;
+
     // interpolate variables / secrets, returning the sanitizing replacers to send to
     // periphery so it may sanitize the final command for safe logging (avoids exposing secret values)
     let secret_replacers = if !stack.config.skip_secret_interp {
-      let VariablesAndSecrets { variables, secrets } =
-        get_variables_and_secrets().await?;
-
       let mut interpolator =
         Interpolator::new(Some(&variables), &secrets);
 
