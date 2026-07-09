@@ -32,7 +32,10 @@ use crate::{
   api::write::WriteArgs,
   helpers::{
     periphery_client,
-    query::{VariablesAndSecrets, get_variables_and_secrets},
+    query::{
+      VariablesAndSecrets, get_variables_and_secrets,
+      redact_stack_display_secrets, stack_display_secret_replacers,
+    },
     stack_git_token,
     swarm::swarm_request,
     update::{
@@ -158,12 +161,14 @@ impl Resolve<ExecuteArgs> for DeployStack {
       || format!("Failed to get registry token in call to db. Stopping run. | {} | {}", stack.config.registry_provider, stack.config.registry_account),
     )?;
 
+    let VariablesAndSecrets { variables, secrets } =
+      get_variables_and_secrets().await?;
+    let display_secret_replacers =
+      stack_display_secret_replacers(&secrets);
+
     // interpolate variables / secrets, returning the sanitizing replacers to send to
     // periphery so it may sanitize the final command for safe logging (avoids exposing secret values)
     let secret_replacers = if !stack.config.skip_secret_interp {
-      let VariablesAndSecrets { variables, secrets } =
-        get_variables_and_secrets().await?;
-
       let mut interpolator =
         Interpolator::new(Some(&variables), &secrets);
 
@@ -252,7 +257,12 @@ impl Resolve<ExecuteArgs> for DeployStack {
               })
               .collect(),
           ),
-          merged_config,
+          merged_config.map(|config| {
+            redact_stack_display_secrets(
+              &config,
+              &display_secret_replacers,
+            )
+          }),
           commit_hash.clone(),
           commit_message.clone(),
         )

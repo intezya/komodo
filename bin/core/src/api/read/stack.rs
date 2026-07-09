@@ -22,9 +22,16 @@ use reqwest::StatusCode;
 
 use crate::{
   helpers::{
-    periphery_client, query::get_all_tags, swarm::swarm_request,
+    periphery_client,
+    query::{
+      VariablesAndSecrets, get_all_tags, get_variables_and_secrets,
+      redact_stack_display_secrets, stack_display_secret_replacers,
+    },
+    swarm::swarm_request,
   },
-  permission::get_check_permissions,
+  permission::{
+    get_check_permissions, get_user_permission_on_resource,
+  },
   resource,
   stack::setup_stack_execution,
   state::{action_states, stack_status_cache},
@@ -37,14 +44,44 @@ impl Resolve<ReadArgs> for GetStack {
     self,
     ReadArgs { user }: &ReadArgs,
   ) -> mogh_error::Result<Stack> {
-    Ok(
-      get_check_permissions::<Stack>(
-        &self.stack,
-        user,
-        PermissionLevel::Read.into(),
-      )
-      .await?,
+    let mut stack = get_check_permissions::<Stack>(
+      &self.stack,
+      user,
+      PermissionLevel::Read.into(),
     )
+    .await?;
+
+    let VariablesAndSecrets { secrets, .. } =
+      get_variables_and_secrets().await?;
+    let display_secret_replacers =
+      stack_display_secret_replacers(&secrets);
+
+    if let Some(deployed_config) = stack.info.deployed_config.as_mut()
+    {
+      *deployed_config = redact_stack_display_secrets(
+        deployed_config,
+        &display_secret_replacers,
+      );
+    }
+
+    let permission =
+      get_user_permission_on_resource::<Stack>(user, &stack.id)
+        .await?;
+    // Keep writable file views raw so editors do not round-trip
+    // redacted placeholders back onto disk.
+    if permission.level < PermissionLevel::Write
+      && let Some(remote_contents) =
+        stack.info.remote_contents.as_mut()
+    {
+      for remote_contents in remote_contents {
+        remote_contents.contents = redact_stack_display_secrets(
+          &remote_contents.contents,
+          &display_secret_replacers,
+        );
+      }
+    }
+
+    Ok(stack)
   }
 }
 
