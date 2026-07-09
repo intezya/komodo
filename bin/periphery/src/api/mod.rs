@@ -27,6 +27,9 @@ mod keys;
 mod poll;
 mod swarm;
 
+#[cfg(test)]
+pub(crate) use compose::deploy_response_from_logs as compose_deploy_response_from_logs;
+
 #[derive(Debug)]
 pub struct Args {
   pub core: String,

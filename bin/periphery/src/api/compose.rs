@@ -670,7 +670,8 @@ impl Resolve<crate::api::Args> for ComposeUp {
     // Pull images before deploying
     if stack.config.auto_pull {
       // Pull images before destroying to minimize downtime.
-      // If this fails, do not continue.
+      // A pull failure is still logged, but a later successful up can
+      // still deploy using locally cached images.
       let command = format!(
         "{docker_compose} -p {project_name} -f {file_args}{env_file_args} pull{service_args}",
       );
@@ -705,9 +706,6 @@ impl Resolve<crate::api::Args> for ComposeUp {
         unreachable!()
       };
       res.logs.push(log);
-      if !all_logs_success(&res.logs) {
-        return Ok(res);
-      }
     }
 
     if stack.config.destroy_before_deploy
@@ -753,8 +751,8 @@ impl Resolve<crate::api::Args> for ComposeUp {
       unreachable!()
     };
 
-    res.deployed = log.success;
     res.logs.push(log);
+    res.deployed = deploy_succeeded_from_logs(&res.logs);
 
     if res.deployed && !stack.config.post_deploy.is_none() {
       let post_deploy_path =
@@ -1069,6 +1067,27 @@ fn maybe_wrap_command(
   }
 
   Ok((wrapper.replace("[[COMPOSE_COMMAND]]", &command), true))
+}
+
+fn deploy_succeeded_from_logs(logs: &[Log]) -> bool {
+  logs
+    .iter()
+    .rev()
+    .find(|log| log.stage == "Compose Up")
+    .map(|log| log.success)
+    .unwrap_or(false)
+}
+
+#[cfg(test)]
+pub(crate) fn deploy_response_from_logs(
+  logs: Vec<Log>,
+) -> DeployStackResponse {
+  let deployed = deploy_succeeded_from_logs(&logs);
+  DeployStackResponse {
+    logs,
+    deployed,
+    ..Default::default()
+  }
 }
 
 #[instrument("ComposeDown", skip(res))]
