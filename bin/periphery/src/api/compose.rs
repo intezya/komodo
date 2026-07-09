@@ -1,9 +1,10 @@
-use std::{borrow::Cow, fmt::Write, path::PathBuf};
+use std::{borrow::Cow, fmt::Write, path::PathBuf, time::Duration};
 
 use anyhow::{Context, anyhow};
 use command::{
   KomodoCommandMode, run_komodo_command_with_sanitization,
-  run_komodo_shell_command, run_komodo_standard_command,
+  run_komodo_shell_command_with_timeout, run_komodo_standard_command,
+  run_komodo_standard_command_with_timeout,
 };
 use formatting::format_serror;
 use git::write_commit_file;
@@ -36,6 +37,8 @@ use crate::{
   },
 };
 
+const LOG_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+
 impl Resolve<crate::api::Args> for GetComposeLog {
   async fn resolve(
     self,
@@ -58,8 +61,13 @@ impl Resolve<crate::api::Args> for GetComposeLog {
       services.join(" ")
     );
     Ok(
-      run_komodo_standard_command("Get Stack Log", None, command)
-        .await,
+      run_komodo_standard_command_with_timeout(
+        "Get Stack Log",
+        None,
+        command,
+        LOG_COMMAND_TIMEOUT,
+      )
+      .await,
     )
   }
 }
@@ -89,8 +97,13 @@ impl Resolve<crate::api::Args> for GetComposeLogSearch {
       services.join(" ")
     );
     Ok(
-      run_komodo_shell_command("Search Stack Log", None, command)
-        .await,
+      run_komodo_shell_command_with_timeout(
+        "Search Stack Log",
+        None,
+        command,
+        LOG_COMMAND_TIMEOUT,
+      )
+      .await,
     )
   }
 }

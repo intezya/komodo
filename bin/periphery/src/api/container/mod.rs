@@ -1,6 +1,10 @@
+use std::time::Duration;
+
 use anyhow::Context;
 use command::{
-  run_komodo_shell_command, run_komodo_standard_command,
+  run_komodo_shell_command, run_komodo_shell_command_with_timeout,
+  run_komodo_standard_command,
+  run_komodo_standard_command_with_timeout,
 };
 use futures_util::future::join_all;
 use komodo_client::entities::{
@@ -20,6 +24,8 @@ use crate::{
 };
 
 mod run;
+
+const LOG_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 
 // ======
 //  READ
@@ -61,8 +67,13 @@ impl Resolve<crate::api::Args> for GetContainerLog {
     let command =
       format!("docker logs {name} --tail {tail}{timestamps}");
     Ok(
-      run_komodo_standard_command("Get container log", None, command)
-        .await,
+      run_komodo_standard_command_with_timeout(
+        "Get container log",
+        None,
+        command,
+        LOG_COMMAND_TIMEOUT,
+      )
+      .await,
     )
   }
 }
@@ -91,10 +102,11 @@ impl Resolve<crate::api::Args> for GetContainerLogSearch {
       "docker logs {name} --tail 5000{timestamps} 2>&1 | {grep}"
     );
     Ok(
-      run_komodo_shell_command(
+      run_komodo_shell_command_with_timeout(
         "Get container log grep",
         None,
         command,
+        LOG_COMMAND_TIMEOUT,
       )
       .await,
     )
