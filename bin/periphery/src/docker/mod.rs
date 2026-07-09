@@ -147,7 +147,13 @@ fn redact_docker_login_token_fragments(
     let match_len =
       longest_token_fragment_match(&text_chars[index..], &token_chars);
 
-    if match_len >= min_match_len {
+    if match_len >= min_match_len
+      || is_delimited_short_token_fragment(
+        &text_chars,
+        index,
+        match_len,
+      )
+    {
       redacted.push_str("[REDACTED]");
       index += match_len;
       continue;
@@ -158,6 +164,32 @@ fn redact_docker_login_token_fragments(
   }
 
   redacted
+}
+
+fn is_delimited_short_token_fragment(
+  text: &[char],
+  start: usize,
+  match_len: usize,
+) -> bool {
+  if match_len == 0 {
+    return false;
+  }
+
+  let before = start
+    .checked_sub(1)
+    .and_then(|index| text.get(index))
+    .copied();
+  let after = text.get(start + match_len).copied();
+
+  is_non_alphanumeric_boundary(before)
+    && is_non_alphanumeric_boundary(after)
+}
+
+fn is_non_alphanumeric_boundary(character: Option<char>) -> bool {
+  match character {
+    Some(character) => !character.is_alphanumeric(),
+    None => true,
+  }
 }
 
 fn longest_token_fragment_match(
@@ -643,7 +675,10 @@ mod tests {
     time::{SystemTime, UNIX_EPOCH},
   };
 
-  use super::{docker_login, docker_login_args};
+  use super::{
+    docker_login, docker_login_args,
+    redact_docker_login_token_fragments,
+  };
 
   fn path_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -727,6 +762,19 @@ mod tests {
 
     assert!(!args.join(" ").contains(token));
     assert!(args.contains(&"--password-stdin".to_string()));
+  }
+
+  #[test]
+  fn docker_login_output_redacts_delimited_short_token_fragments() {
+    let redacted = redact_docker_login_token_fragments(
+      "single:a\npair:bc\ntriple:123\nquoted:\"XY\"\nword:stacktrace\n",
+      "abc123XYZ",
+    );
+
+    assert_eq!(
+      redacted,
+      "single:[REDACTED]\npair:[REDACTED]\ntriple:[REDACTED]\nquoted:\"[REDACTED]\"\nword:stacktrace\n"
+    );
   }
 
   #[tokio::test]
