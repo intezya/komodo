@@ -40,6 +40,11 @@ for image in komodo-binaries komodo-ui; do
   fi
 done
 
+if ! grep -Fq 'docker create --entrypoint /km "ghcr.io/intezya/komodo-binaries:${GITHUB_REF_NAME}"' "$release_workflow"; then
+  echo "$release_workflow does not create the binaries container with an explicit command" >&2
+  exit 1
+fi
+
 for dockerfile in \
   bin/binaries.Dockerfile \
   ui/Dockerfile \

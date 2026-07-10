@@ -49,7 +49,7 @@ jobs:
         run: |
           mkdir -p dist/assets
           docker pull "ghcr.io/intezya/komodo-binaries:${GITHUB_REF_NAME}"
-          container_id="$(docker create "ghcr.io/intezya/komodo-binaries:${GITHUB_REF_NAME}")"
+          container_id="$(docker create --entrypoint /km "ghcr.io/intezya/komodo-binaries:${GITHUB_REF_NAME}")"
           docker cp "$container_id:/km" dist/assets/km-x86_64
           docker cp "$container_id:/periphery" dist/assets/periphery-x86_64
           docker cp "$container_id:/core" dist/assets/core-x86_64
