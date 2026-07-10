@@ -1,6 +1,6 @@
 # Komodo P1 Performance Program Design
 
-**Status:** Approved for implementation-plan drafting on 2026-07-10
+**Status:** Approved; four implementation plans completed on 2026-07-10
 
 ## Context
 
@@ -225,21 +225,26 @@ bounded by explicit concurrency and memory budgets.
 - Coalesce progress notifications while guaranteeing an uncoalesced terminal
   event. Add optional `{ stream_epoch, sequence }` metadata to the existing
   event envelope so old UI versions continue to parse it. `stream_epoch` is a
-  fresh identifier for one Core process's Update broadcast stream and changes
-  on Core restart or when a client reconnects to another Core instance.
-  `sequence` is an atomic, strictly increasing counter within that epoch and is
-  assigned to every broadcast Update event before fan-out.
+  fresh identifier for each authenticated Update WebSocket connection.
+  `sequence` strictly increases only for events authorized and delivered on
+  that connection. It is assigned after permission filtering, so hidden events
+  cannot create false gaps. If the internal broadcast receiver lags or
+  authorization is indeterminate, close the socket; reconnect creates a new
+  epoch and forces the synchronization barrier instead of silently skipping a
+  possibly visible event.
 - Reuse the permission snapshot from Plan 1 for WebSocket delivery, with safe
   invalidation and a documented fallback when the snapshot is unavailable.
 - Move bcrypt and system-information collection to bounded blocking execution.
   Publish short-lived immutable stats snapshots instead of holding locks across
   Docker or compose awaits.
 - Add separate user-work and monitoring concurrency budgets at batch,
-  monitoring, transport, and Docker process fan-out boundaries. Acquire global
-  permits before per-server permits. User work waits in a bounded queue until a
-  declared deadline and then returns an explicit overload result; monitoring
-  uses non-blocking acquisition and reschedules skipped work. Permit ownership
-  must be cancellation-safe and released on every error or panic path.
+  monitoring, transport, and Docker process fan-out boundaries. User admission
+  reserves bounded per-work-key and global queue slots, then acquires the fair
+  per-work-key permit before the fair global permit under one deadline. A hot
+  key therefore cannot hold scarce global execution capacity while it waits.
+  Monitoring uses non-blocking acquisition and reschedules skipped work. Permit
+  ownership must be cancellation-safe and released on every error or panic
+  path.
 - Replace `Command::output()` on affected large-output paths with bounded pipe
   readers or ring buffers before allocation. Apply an 8 MiB byte cap, existing
   line caps where applicable, explicit truncation markers, and deterministic
@@ -347,9 +352,14 @@ and should not continuously refetch data for closed or hidden features.
   browser cache for subsequent openings.
 - Mount one OmniSearch instance and enable its queries only while the search is
   open.
-- Treat WebSocket-delivered state as the primary freshness mechanism. Use slow
-  60-second safety polling after a synchronized connection and retain the
-  current faster intervals only while disconnected.
+- Treat WebSocket-delivered state as the primary freshness mechanism for query
+  families whose every relevant change is represented by an Update frame. Use
+  slow 60-second safety polling for that narrow set after synchronization.
+  Dashboard summaries also use 60 seconds while synchronized as an explicit
+  idle-dashboard freshness tradeoff needed by the approved request budget.
+  Alerts, live logs, historical stats, Docker/Swarm runtime data, and other
+  independently changing families retain their existing cadence even while
+  connected.
 - On every initial connection and reconnection, invalidate the relevant
   WebSocket-managed query families and await a full refetch barrier before
   switching to the slow safety cadence. A detected event-sequence gap triggers
@@ -383,9 +393,12 @@ and should not continuously refetch data for closed or hidden features.
 - Monaco typing requests are absent until an editor is opened.
 - Before changing query policy, capture a real sixty-second browser-network
   baseline; the audit's 76/130/338 per-minute figures remain explicitly labeled
-  static-cadence estimates. With WebSocket synchronized, an idle dashboard then
-  performs at least 80% fewer background HTTP refetches than that runtime
-  baseline.
+  static-cadence estimates. With WebSocket synchronized, the literal
+  Plan-3-owned endpoint families on profile and idle-dashboard workloads each
+  perform at least 80% fewer refetches than their runtime baseline. A separate
+  total-dashboard gate allows the frozen untouched baseline plus 20% of the
+  owned baseline, so correctness polling cannot be hidden or suppressed to
+  satisfy the percentage.
 - Opening search, an editor, terminal, or chart still loads and functions on
   demand; disconnect/reconnect tests prove polling fallback and recovery.
 
@@ -393,7 +406,8 @@ and should not continuously refetch data for closed or hidden features.
 
 - Produce a Vite manifest and bundle-size comparison before and after each
   split.
-- Record request counts for sixty seconds on a generic page and dashboard, with
+- Record total, Plan-3-owned, and untouched request counts inside one
+  marker-validated sixty-second window on a generic page and dashboard, with
   WebSocket connected and disconnected.
 - Add component-level tests where available; otherwise document Playwright or
   browser verification for dynamic imports, loading states, reconnect, and
@@ -435,15 +449,17 @@ and across distinct release tags without weakening cache trust boundaries.
    default.
 3. The CI Cargo cache is commented out, so build and test jobs repeat dependency
    compilation.
-4. `mogh_config` enables the default `cicada` feature although source search
-   found no direct use; removing that edge reduced the simulated resolved graph
-   from 729 to 664 package versions.
+4. `mogh_config` enables the default `cicada` feature and enlarges the resolved
+   graph. The deeper audit rejected removal: Core, Periphery, and CLI accept
+   operator-controlled config paths, while `mogh_config` gives `cicada:` paths
+   distinct runtime semantics. The apparent dependency optimization is a
+   compatibility change, not an unused edge.
 
 ### Target architecture
 
-- Publish stable GHCR registry cache references per build scope from trusted
-  `main`; release tags may read those references but do not create tag-local
-  cache namespaces. Untrusted PRs must never write to trusted cache references.
+- Publish stable GHCR registry cache references per build scope only from an
+  explicit trusted-`main` seed dispatch; release tags may read but never write
+  those references. Untrusted PRs must never write trusted cache references.
 - Separate dependency recipe/build layers from frequently changing workspace
   source using `cargo-chef`. Keep cache mounts only as within-run acceleration;
   cross-run correctness must come from exported BuildKit layers.
@@ -451,8 +467,8 @@ and across distinct release tags without weakening cache trust boundaries.
   the GHA layer exporter includes their contents.
 - Restore compiler-aware Cargo caching in CI, save trusted default-branch
   entries separately from PR entries, and cancel superseded runs.
-- Disable `mogh_config` default features only after real configuration fixtures
-  and startup paths prove Cicada support is not required.
+- Run a workspace-member dependency audit and retain the Cicada edge unless a
+  separately approved compatibility migration removes `cicada:` config paths.
 
 ### Safety constraints
 
@@ -460,8 +476,7 @@ and across distinct release tags without weakening cache trust boundaries.
 - Release binaries must still be produced once and copied into the final image
   matrix without architecture drift.
 - Cache changes must retain reproducibility from an empty cache.
-- Dependency-feature removal must preserve supported config formats and startup
-  behavior.
+- Dependency cleanup must not silently remove a supported config path scheme.
 
 ### Success criteria
 
@@ -473,8 +488,9 @@ and across distinct release tags without weakening cache trust boundaries.
 - Across five cache-disabled and five warm-cache runs on the same runner class,
   warm CI median duration is at least 25% lower and cache restore/upload takes
   less than 20% of total job time.
-- The resolved Cargo graph drops the verified Cicada-only closure and all
-  configuration regression tests pass.
+- `cargo-machete` reports no unused direct dependencies in real workspace
+  members, and the Cicada no-change decision is recorded with runtime-path
+  evidence; Cargo manifests and lockfile remain unchanged by that finding.
 - Cold, cache-miss builds remain successful and pass the same binary version,
   startup, and image smoke tests as warm builds.
 
@@ -487,21 +503,25 @@ and across distinct release tags without weakening cache trust boundaries.
   the stable cache reference only after review.
 - Compare cold, warm, source-only-change, and lockfile-change builds.
 - Track median CI duration over multiple runs instead of a single best run.
-- Add configuration fixtures covering every supported loader path before
-  changing `mogh_config` features.
+- Record the `mogh_config` feature path and every Komodo `ConfigLoader` runtime
+  entrypoint; do not treat package-count reduction as proof of unused behavior.
 - Treat checksums as informational unless all reproducibility inputs are pinned;
   functional equivalence is established by the declared smoke tests.
 
 ### Ordered PR checkpoints
 
 1. Add non-publishing rehearsal mode, cache-hit metrics, and release-structure
-   regression checks without changing production cache sources.
-2. Add `cargo-chef` dependency layers and stable trusted registry-cache scopes;
-   validate cold and two-run rehearsal paths before enabling them for releases.
+   regression checks without changing tag-release cache inputs. Rehearsals may
+   write only unique disposable references; this checkpoint must not seed or
+   otherwise write the stable references.
+2. Add `cargo-chef` dependency layers, validate cold and two-run rehearsal
+   paths, then switch tag releases to read-only stable GHCR cache inputs and
+   populate those references through one serialized, explicit trusted-`main`
+   seed dispatch.
 3. Restore compiler-aware CI Cargo caching and superseded-run cancellation,
    then collect the five-run comparison.
-4. Add configuration fixtures and disable the verified-unused Cicada feature
-   edge in a separate dependency commit.
+4. Record the executable dependency audit and the reviewed no-change Cicada
+   decision in a documentation-only checkpoint.
 
 ## Cross-Plan Dependencies and Execution Order
 
@@ -509,18 +529,25 @@ and across distinct release tags without weakening cache trust boundaries.
    checkpoint 4: it must expose one reviewed `PermissionSnapshotProvider`
    contract backed by `{ generation, mutation_in_progress }`, plus cross-Core
    compatibility tests and the cache kill switch.
-2. Plan 2 checkpoints 1–3 may execute before Merge Gate A. Plan 2 checkpoint 4
-   may begin only after `PermissionSnapshotProvider` merges; it must consume
-   that provider rather than introducing another permission cache.
+2. Plan 2 checkpoints 1–2 may execute before Plan 1. Plan 2 checkpoint 3 starts
+   after Plan 1 checkpoint 3 because it consumes dirty-aware resource reads and
+   the batched monitoring inventory. Plan 2 checkpoint 4 may begin only after
+   `PermissionSnapshotProvider` merges at Merge Gate A; it must consume that
+   provider rather than introducing another permission cache.
 3. Plan 2 checkpoint 4 defines Merge Gate B: the existing Update event envelope
    remains valid and gains optional `{ stream_epoch, sequence }` metadata with
-   the reset and comparison rules defined in Plan 2. Compatibility tests must
-   cover Core restart, reconnection to another Core, gaps, duplicates,
-   out-of-order delivery, and old/new Core plus old/new UI parsing before the
-   gate merges.
+   the producer rules defined in Plan 2. Before Gate B merges, backend and
+   envelope compatibility tests cover Core restart, same-Core and cross-Core
+   reconnects, hidden events, broadcast lag, queue overflow, sequence overflow,
+   and old/new Core plus old/new payload parsing. Lag/overflow closes the socket
+   rather than emitting a knowingly gapped visible stream.
 4. Plan 3 checkpoints 1–2 may execute independently. Plan 3 checkpoint 3 may
-   begin only after Merge Gate B and must implement the reconnect/refetch
-   synchronization barrier before slowing fallback polling.
+   begin only after Merge Gate B. Its tested consumer contract defines Merge
+   Gate C and covers gaps, duplicates, out-of-order delivery, late frames from
+   a replaced connection, old-Core metadata absence, and the reconnect/refetch
+   synchronization barrier. No 60-second polling change may merge before Gate
+   C; this avoids making the frontend implementation a circular prerequisite
+   for the backend Gate B.
 5. Plan 4 is independent and may proceed in parallel with any product-runtime
    checkpoint.
 
