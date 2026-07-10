@@ -27,7 +27,10 @@ use komodo_client::{
     server::Server,
     stack::Stack,
     swarm::Swarm,
-    sync::{ResourceSync, ResourceSyncInfo},
+    sync::{
+      DiffData, ResourceDiff, ResourceSync, ResourceSyncInfo,
+      SyncDeployTarget,
+    },
     to_path_compatible_name,
     update::{Log, Update},
     user::sync_user,
@@ -697,13 +700,12 @@ impl Resolve<WriteArgs> for RefreshResourceSyncPending {
   ) -> mogh_error::Result<ResourceSync> {
     // Even though this is a write request, this doesn't change any config. Anyone that can execute the
     // sync should be able to do this.
-    let mut sync =
-      get_check_permissions::<entities::sync::ResourceSync>(
-        &self.sync,
-        user,
-        PermissionLevel::Execute.into(),
-      )
-      .await?;
+    let sync = get_check_permissions::<entities::sync::ResourceSync>(
+      &self.sync,
+      user,
+      PermissionLevel::Execute.into(),
+    )
+    .await?;
 
     let repo = if !sync.config.files_on_host
       && !sync.config.linked_repo.is_empty()
@@ -725,244 +727,295 @@ impl Resolve<WriteArgs> for RefreshResourceSyncPending {
       return Ok(sync);
     }
 
-    let res = async {
-      let RemoteResources {
-        resources,
-        files,
-        file_errors,
-        hash,
-        message,
-        ..
-      } = crate::sync::remote::get_remote_resources(
-        &sync,
-        repo.as_ref(),
-      )
-      .await
-      .context("failed to get remote resources")?;
-
-      sync.info.remote_contents = files;
-      sync.info.remote_errors = file_errors;
-      sync.info.pending_hash = hash;
-      sync.info.pending_message = message;
-
-      if !sync.info.remote_errors.is_empty() {
-        return Err(anyhow!(
-          "Remote resources have errors. Cannot compute diffs."
-        ));
-      }
-
-      let resources = resources?;
-      let delete = sync.config.managed || sync.config.delete;
-      let all_resources = AllResourcesById::load().await?;
-
-      let (resource_updates, deploy_updates) =
-        if sync.config.include_resources {
-          let id_to_tags = get_id_to_tags(None).await?;
-
-          let deployments_by_name = all_resources
-            .deployments
-            .values()
-            .map(|deployment| {
-              (deployment.name.clone(), deployment.clone())
-            })
-            .collect::<HashMap<_, _>>();
-          let stacks_by_name = all_resources
-            .stacks
-            .values()
-            .map(|stack| (stack.name.clone(), stack.clone()))
-            .collect::<HashMap<_, _>>();
-
-          let deploy_updates =
-            crate::sync::deploy::get_updates_for_view(
-              SyncDeployParams {
-                deployments: &resources.deployments,
-                deployment_map: &deployments_by_name,
-                stacks: &resources.stacks,
-                stack_map: &stacks_by_name,
-              },
-            )
-            .await;
-
-          let mut diffs = Vec::new();
-
-          macro_rules! push_updates {
-            ($(($Type:ident, $field:ident)),* $(,)?) => {
-              $(
-                push_updates_for_view::<$Type>(
-                  resources.$field,
-                  delete,
-                  None,
-                  None,
-                  &id_to_tags,
-                  &sync.config.match_tags,
-                  &mut diffs,
-                )
-                .await?;
-              )*
-            };
-          }
-          // New resource types need to be added here manually.
-          push_updates!(
-            (Server, servers),
-            (Swarm, swarms),
-            (Stack, stacks),
-            (Deployment, deployments),
-            (Build, builds),
-            (Repo, repos),
-            (Procedure, procedures),
-            (Action, actions),
-            (Builder, builders),
-            (Alerter, alerters),
-            (ResourceSync, resource_syncs),
-          );
-
-          (diffs, deploy_updates)
-        } else {
-          Default::default()
-        };
-
-      let variable_updates = if sync.config.include_variables {
-        crate::sync::variables::get_updates_for_view(
-          &resources.variables,
-          delete,
-        )
-        .await?
-      } else {
-        Default::default()
-      };
-
-      let user_group_updates = if sync.config.include_user_groups {
-        crate::sync::user_groups::get_updates_for_view(
-          resources.user_groups,
-          delete,
-        )
-        .await?
-      } else {
-        Default::default()
-      };
-
-      anyhow::Ok((
-        resource_updates,
-        deploy_updates,
-        variable_updates,
-        user_group_updates,
-      ))
-    }
-    .await;
-
-    let (
-      resource_updates,
-      (pending_deploys, pending_deploy_error),
-      variable_updates,
-      user_group_updates,
-      pending_error,
-    ) = match res {
-      Ok(res) => (res.0, res.1, res.2, res.3, None),
-      Err(e) => (
-        Default::default(),
-        Default::default(),
-        Default::default(),
-        Default::default(),
-        Some(format_serror(&e.into())),
-      ),
-    };
-
-    let has_updates = !resource_updates.is_empty()
-      || !pending_deploys.is_empty()
-      || !variable_updates.is_empty()
-      || !user_group_updates.is_empty();
-
-    let info = ResourceSyncInfo {
-      last_sync_ts: sync.info.last_sync_ts,
-      last_sync_hash: sync.info.last_sync_hash,
-      last_sync_message: sync.info.last_sync_message,
-      remote_contents: sync.info.remote_contents,
-      remote_errors: sync.info.remote_errors,
-      pending_hash: sync.info.pending_hash,
-      pending_message: sync.info.pending_message,
-      pending_deploys,
-      pending_deploy_error,
-      resource_updates,
-      variable_updates,
-      user_group_updates,
-      pending_error,
-    };
-
-    let info = to_document(&info)
-      .context("failed to serialize pending to document")?;
-
-    update_one_by_id(
-      &db_client().resource_syncs,
-      &sync.id,
-      doc! { "$set": { "info": info } },
-      None,
-    )
-    .await?;
-
-    // check to update alert
-    let id = sync.id.clone();
-    let name = sync.name.clone();
-    tokio::task::spawn(async move {
-      let db = db_client();
-      let Some(existing) = db_client()
-        .alerts
-        .find_one(doc! {
-          "resolved": false,
-          "target.type": "ResourceSync",
-          "target.id": &id,
-        })
+    let remote =
+      crate::sync::remote::get_remote_resources(&sync, repo.as_ref())
         .await
-        .context("failed to query db for alert")
-        .inspect_err(|e| warn!("{e:#}"))
-        .ok()
-      else {
-        return;
-      };
-      match (existing, has_updates) {
-        // OPEN A NEW ALERT
-        (None, true) => {
-          let alert = Alert {
-            id: Default::default(),
-            ts: komodo_timestamp(),
-            resolved: false,
-            level: SeverityLevel::Ok,
-            target: ResourceTarget::ResourceSync(id.clone()),
-            data: AlertData::ResourceSyncPendingUpdates { id, name },
-            resolved_ts: None,
+        .context("failed to get remote resources")?;
+
+    Ok(refresh_prepared_resource_sync_pending(sync, remote).await?)
+  }
+}
+
+fn pending_info(
+  sync: &ResourceSync,
+  resource_updates: Vec<ResourceDiff>,
+  pending_deploys: Vec<SyncDeployTarget>,
+  pending_deploy_error: Option<String>,
+  variable_updates: Vec<DiffData>,
+  user_group_updates: Vec<DiffData>,
+  pending_error: Option<String>,
+) -> ResourceSyncInfo {
+  ResourceSyncInfo {
+    last_sync_ts: sync.info.last_sync_ts,
+    last_sync_hash: sync.info.last_sync_hash.clone(),
+    last_sync_message: sync.info.last_sync_message.clone(),
+    remote_contents: sync.info.remote_contents.clone(),
+    remote_errors: sync.info.remote_errors.clone(),
+    pending_hash: sync.info.pending_hash.clone(),
+    pending_message: sync.info.pending_message.clone(),
+    pending_deploys,
+    pending_deploy_error,
+    resource_updates,
+    variable_updates,
+    user_group_updates,
+    pending_error,
+  }
+}
+
+/// Recomputes Resource Sync pending state from a Git snapshot that was already
+/// fetched by another caller.
+pub(crate) async fn refresh_prepared_resource_sync_pending(
+  mut sync: ResourceSync,
+  remote: RemoteResources,
+) -> anyhow::Result<ResourceSync> {
+  let res = async {
+    let RemoteResources {
+      resources,
+      files,
+      file_errors,
+      hash,
+      message,
+      ..
+    } = remote;
+
+    sync.info.remote_contents = files;
+    sync.info.remote_errors = file_errors;
+    sync.info.pending_hash = hash;
+    sync.info.pending_message = message;
+
+    if !sync.info.remote_errors.is_empty() {
+      return Err(anyhow!(
+        "Remote resources have errors. Cannot compute diffs."
+      ));
+    }
+
+    let resources = resources?;
+    let delete = sync.config.managed || sync.config.delete;
+    let all_resources = AllResourcesById::load().await?;
+
+    let (resource_updates, deploy_updates) = if sync
+      .config
+      .include_resources
+    {
+      let id_to_tags = get_id_to_tags(None).await?;
+
+      let deployments_by_name = all_resources
+        .deployments
+        .values()
+        .map(|deployment| {
+          (deployment.name.clone(), deployment.clone())
+        })
+        .collect::<HashMap<_, _>>();
+      let stacks_by_name = all_resources
+        .stacks
+        .values()
+        .map(|stack| (stack.name.clone(), stack.clone()))
+        .collect::<HashMap<_, _>>();
+
+      let deploy_updates =
+        crate::sync::deploy::get_updates_for_view(SyncDeployParams {
+          deployments: &resources.deployments,
+          deployment_map: &deployments_by_name,
+          stacks: &resources.stacks,
+          stack_map: &stacks_by_name,
+        })
+        .await;
+
+      let mut diffs = Vec::new();
+
+      macro_rules! push_updates {
+          ($(($Type:ident, $field:ident)),* $(,)?) => {
+            $(
+              push_updates_for_view::<$Type>(
+                resources.$field,
+                delete,
+                None,
+                None,
+                &id_to_tags,
+                &sync.config.match_tags,
+                &mut diffs,
+              )
+              .await?;
+            )*
           };
-          db.alerts
-            .insert_one(&alert)
-            .await
-            .context("failed to open existing pending resource sync updates alert")
-            .inspect_err(|e| warn!("{e:#}"))
-            .ok();
-          if sync.config.pending_alert {
-            send_alerts(&[alert]).await;
-          }
         }
-        // CLOSE ALERT
-        (Some(existing), false) => {
-          update_one_by_id(
-            &db.alerts,
-            &existing.id,
-            doc! {
-              "$set": {
-                "resolved": true,
-                "resolved_ts": komodo_timestamp()
-              }
-            },
-            None,
-          )
+      push_updates!(
+        (Server, servers),
+        (Swarm, swarms),
+        (Stack, stacks),
+        (Deployment, deployments),
+        (Build, builds),
+        (Repo, repos),
+        (Procedure, procedures),
+        (Action, actions),
+        (Builder, builders),
+        (Alerter, alerters),
+        (ResourceSync, resource_syncs),
+      );
+
+      (diffs, deploy_updates)
+    } else {
+      Default::default()
+    };
+
+    let variable_updates = if sync.config.include_variables {
+      crate::sync::variables::get_updates_for_view(
+        &resources.variables,
+        delete,
+      )
+      .await?
+    } else {
+      Default::default()
+    };
+
+    let user_group_updates = if sync.config.include_user_groups {
+      crate::sync::user_groups::get_updates_for_view(
+        resources.user_groups,
+        delete,
+      )
+      .await?
+    } else {
+      Default::default()
+    };
+
+    anyhow::Ok((
+      resource_updates,
+      deploy_updates,
+      variable_updates,
+      user_group_updates,
+    ))
+  }
+  .await;
+
+  let (
+    resource_updates,
+    (pending_deploys, pending_deploy_error),
+    variable_updates,
+    user_group_updates,
+    pending_error,
+  ) = match res {
+    Ok(res) => (res.0, res.1, res.2, res.3, None),
+    Err(e) => (
+      Default::default(),
+      Default::default(),
+      Default::default(),
+      Default::default(),
+      Some(format_serror(&e.into())),
+    ),
+  };
+
+  let has_updates = !resource_updates.is_empty()
+    || !pending_deploys.is_empty()
+    || !variable_updates.is_empty()
+    || !user_group_updates.is_empty();
+
+  let info = pending_info(
+    &sync,
+    resource_updates,
+    pending_deploys,
+    pending_deploy_error,
+    variable_updates,
+    user_group_updates,
+    pending_error,
+  );
+
+  let info = to_document(&info)
+    .context("failed to serialize pending to document")?;
+
+  update_one_by_id(
+    &db_client().resource_syncs,
+    &sync.id,
+    doc! { "$set": { "info": info } },
+    None,
+  )
+  .await?;
+
+  let id = sync.id.clone();
+  let name = sync.name.clone();
+  tokio::task::spawn(async move {
+    let db = db_client();
+    let Some(existing) = db_client()
+      .alerts
+      .find_one(doc! {
+        "resolved": false,
+        "target.type": "ResourceSync",
+        "target.id": &id,
+      })
+      .await
+      .context("failed to query db for alert")
+      .inspect_err(|e| warn!("{e:#}"))
+      .ok()
+    else {
+      return;
+    };
+    match (existing, has_updates) {
+      (None, true) => {
+        let alert = Alert {
+          id: Default::default(),
+          ts: komodo_timestamp(),
+          resolved: false,
+          level: SeverityLevel::Ok,
+          target: ResourceTarget::ResourceSync(id.clone()),
+          data: AlertData::ResourceSyncPendingUpdates { id, name },
+          resolved_ts: None,
+        };
+        db.alerts
+          .insert_one(&alert)
           .await
-          .context("failed to close existing pending resource sync updates alert")
+          .context("failed to open existing pending resource sync updates alert")
           .inspect_err(|e| warn!("{e:#}"))
           .ok();
+        if sync.config.pending_alert {
+          send_alerts(&[alert]).await;
         }
-        // NOTHING TO DO
-        _ => {}
       }
-    });
+      (Some(existing), false) => {
+        update_one_by_id(
+          &db.alerts,
+          &existing.id,
+          doc! {
+            "$set": {
+              "resolved": true,
+              "resolved_ts": komodo_timestamp()
+            }
+          },
+          None,
+        )
+        .await
+        .context("failed to close existing pending resource sync updates alert")
+        .inspect_err(|e| warn!("{e:#}"))
+        .ok();
+      }
+      _ => {}
+    }
+  });
 
-    Ok(crate::resource::get::<ResourceSync>(&sync.id).await?)
+  Ok(crate::resource::get::<ResourceSync>(&sync.id).await?)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn pending_info_from_snapshot_replaces_stale_error() {
+    let mut sync = ResourceSync::default();
+    sync.info.last_sync_hash = Some("applied".into());
+    sync.info.pending_hash = Some("pending".into());
+    sync.info.pending_error = Some("stale error".into());
+
+    let info = pending_info(
+      &sync,
+      Default::default(),
+      Default::default(),
+      None,
+      Default::default(),
+      Default::default(),
+      None,
+    );
+
+    assert_eq!(info.last_sync_hash.as_deref(), Some("applied"));
+    assert_eq!(info.pending_hash.as_deref(), Some("pending"));
+    assert!(info.pending_error.is_none());
   }
 }

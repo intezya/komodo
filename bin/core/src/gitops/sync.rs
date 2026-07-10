@@ -21,9 +21,7 @@ use crate::{
   },
 };
 use anyhow::{Context, anyhow};
-use database::mungos::{
-  by_id::update_one_by_id, find::find_collect, mongodb::bson::doc,
-};
+use database::mungos::find::find_collect;
 use formatting::{Color, colored};
 use komodo_client::{
   api::execute::RunSync,
@@ -57,7 +55,7 @@ fn gitops_delete_allowed() -> bool {
 /// source snapshot for this cycle. Delete deltas are calculated first, then
 /// discarded only for execution so they remain available to pending-state code.
 pub(super) async fn reconcile_prepared_sync(
-  sync: ResourceSync,
+  mut sync: ResourceSync,
   remote: RemoteResources,
 ) -> anyhow::Result<Update> {
   let request = ExecuteRequest::RunSync(RunSync {
@@ -76,6 +74,7 @@ pub(super) async fn reconcile_prepared_sync(
 
   let RemoteResources {
     resources,
+    files,
     logs,
     hash,
     message,
@@ -90,6 +89,7 @@ pub(super) async fn reconcile_prepared_sync(
     ));
   }
   let mut resources = resources?;
+  let pending_resources = resources.clone();
 
   let pending_stack_deletes = pending_stack_delete_targets().await?;
   resources.stacks.retain(|stack| {
@@ -299,20 +299,27 @@ pub(super) async fn reconcile_prepared_sync(
     deploy_from_cache(deploy_cache, &mut update.logs).await;
   }
 
-  update_one_by_id(
-    &db_client().resource_syncs,
-    &sync.id,
-    doc! {
-      "$set": {
-        "info.last_sync_ts": komodo_timestamp(),
-        "info.last_sync_hash": hash,
-        "info.last_sync_message": message,
-      }
-    },
-    None,
-  )
-  .await
-  .context("failed to update GitOps sync metadata")?;
+  sync.info.last_sync_ts = komodo_timestamp();
+  sync.info.last_sync_hash = hash.clone();
+  sync.info.last_sync_message = message.clone();
+  if let Err(error) =
+    crate::api::write::refresh_prepared_resource_sync_pending(
+      sync.clone(),
+      RemoteResources {
+        resources: Ok(pending_resources),
+        files,
+        file_errors,
+        logs: Vec::new(),
+        hash,
+        message,
+      },
+    )
+    .await
+  {
+    warn!(sync = sync.name, error = %error, "failed to refresh GitOps pending state");
+    update
+      .push_error_log("Refresh sync pending", format!("{error:#}"));
+  }
 
   update.finalize();
   update_update(update.clone()).await?;
