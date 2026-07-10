@@ -1,6 +1,6 @@
 # Komodo P1 Local Performance Lab Design
 
-**Status:** Proposed for user review
+**Status:** Approved on 2026-07-10
 
 ## Context
 
@@ -90,10 +90,12 @@ the wrapper rather than embedding it in the Compose file.
 
 Services:
 
-- `mongo`: authenticated MongoDB 8 image pinned by an exact multi-architecture
-  manifest digest, persistent data and config volumes, loopback-only port, and
-  a `mongosh` ping healthcheck. Updating the digest is an explicit dependency
-  change accompanied by the resolved version and architecture list.
+- `mongo`: authenticated
+  `mongo:8.0.26@sha256:ffa440e8d62533e24a67696ae1bbb46e610ebb3167d65abd122b496ae06d28e6`,
+  persistent data and config volumes, loopback-only port, and a `mongosh` ping
+  healthcheck. The pinned index contains Linux amd64 and arm64/v8 manifests.
+  Updating the digest is an explicit dependency change accompanied by the
+  resolved version and architecture list.
 - `core-a`: build `bin/core/aio.Dockerfile` from the current checkout, share
   the lab keys volume, use the lab Mongo database, expose port 9120 on
   loopback, and wait for healthy MongoDB.
@@ -111,12 +113,19 @@ Services:
 
 Core A and Core B share the database, JWT secret, and Core/Periphery keys. Both
 Core services use inbound Periphery at `http://periphery:8120`; no
-`PERIPHERY_CORE_ADDRESS` is set. Core A owns initial admin and first-server
-bootstrap, while default Procedures and Actions are disabled for the lab. Core
-B must never start while an Update is `InProgress` or an enabled Procedure or
-Action schedule exists because each Core runs background loops and startup
-recovery. `cross-core-up` proves those conditions directly in MongoDB and
-fails closed before creating Core B.
+`PERIPHERY_CORE_ADDRESS` is set. They use distinct internal
+`KOMODO_HOST` values, `http://127.0.0.1:${P1_CORE_A_PORT}` and
+`http://localhost:${P1_CORE_B_PORT}`, because Periphery keys inbound channels
+by Core hostname while both values remain reachable from the host. Core A owns
+initial admin and first-server bootstrap, while default Procedures and Actions
+are disabled for the lab. Core B must never start while an Update is
+`InProgress`, an enabled Procedure or Action schedule exists, or an Action has
+`run_at_startup` enabled, or an opt-in GitOps Stack/Resource Sync exists because
+each Core runs background loops, startup recovery, startup Actions, and an
+immediate first GitOps reconciliation tick. `cross-core-up` pauses Core A,
+proves those conditions directly in MongoDB a second time, starts and verifies
+Core B, then unpauses Core A. A trap must always unpause Core A and remove a
+partially started Core B on failure, closing the preflight-to-start race.
 
 Create `bin/core/aio.Dockerfile.dockerignore` and
 `bin/periphery/aio.Dockerfile.dockerignore`. They must exclude at least `.dev`,
@@ -179,11 +188,15 @@ Create `scripts/performance/p1-local.sh` with these commands:
   `GET /version` readiness with bounded retries. Then authenticate to Core A
   with the generated local admin and make one Periphery-backed stats request
   through the bootstrapped first Server; component liveness alone is not a
-  successful readiness result.
-- `cross-core-up`: refuse to proceed unless the base stack is healthy, no
-  `InProgress` Update exists, and no enabled Procedure or Action schedule
-  exists. Then start Core B, authenticate through it, and make the same
-  Periphery-backed stats request through Core B.
+  successful readiness result. It then lists Docker containers through Core A
+  and requires the exact Mongo/Core A/Periphery IDs reported by the selected
+  context, proving the mounted socket reaches the same working daemon.
+- `cross-core-up`: refuse to proceed unless the base stack is healthy and the
+  first Mongo preflight is safe. Pause Core A, repeat the Mongo preflight for
+  `InProgress` Updates, enabled Procedure/Action schedules, startup Actions,
+  and opt-in GitOps Stacks/Resource Syncs, then start Core B, authenticate
+  through it, and make the same
+  Periphery-backed stats request. Unpause Core A on success and on every error.
 - `cross-core-down`: stop and remove only Core B while preserving the base
   stack and all volumes.
 - `status`: show Compose service and health state without exposing secrets.
@@ -194,15 +207,26 @@ Create `scripts/performance/p1-local.sh` with these commands:
 Users invoke the wrapper through `rtk`, but the checked-in script itself calls
 the underlying tools directly, matching existing repository scripts.
 
+The runtime verifier is a test runner rather than an operator orchestration
+surface. It uses the wrapper for normal build, readiness, cross-Core, teardown,
+and reset behavior, but may perform fixed-project read-only inspection,
+exact-service stop/start failure injection, and one-shot toolbox commands. All
+such calls must repeat the selected local context, project, env file, and
+Compose file and must never address unrelated Docker objects.
+
 ## Extension Contracts for the P1 Plans
 
 Plan 1 may add fixture and profiler scripts that use the `toolbox` profile,
 the loopback Mongo port, and the generated database credentials. Cardinality
-fixtures and production index inventory remain owned by Plan 1.
+fixtures and production index inventory remain owned by Plan 1. Its checkpoint
+must create separate manifest-backed `p1_*` databases for 1/100/1,000; the base
+lab neither provisions nor relabels them.
 
 Plan 2 may use the base stack for Core/Periphery behavior and the temporary
 Core B profile for event and permission tests. Its normative RSS and scheduler
-gates still require the declared Linux cgroup-v2 preflight.
+gates still require the declared Linux cgroup-v2 preflight. Its staging scripts
+own a separate `komodo_runtime_backpressure_*` database and must not reuse the
+base functional database as measurement evidence.
 
 Plan 3 may point Vite or production preview at Core A, then add the planned
 fault proxy and HAR tooling. The base lab does not add Playwright or redefine
@@ -211,6 +235,20 @@ the UI plan's browser budgets.
 Plan 4 may reuse the built images for smoke tests. GitHub Actions concurrency,
 GHA cache behavior, GHCR lifecycle, hosted-runner timings, and release
 publication remain remote acceptance gates.
+
+Create `docs/performance/p1-local-lab.md` as the operator entry point. It must
+state that the fixture seeders and browser fault/HAR harness arrive in their
+own P1 checkpoints rather than implying that the base lab alone closes those
+acceptance gates.
+
+Create `scripts/performance/verify-p1-local-runtime.sh` as the machine-readable
+runtime verifier. It reruns readiness and lifecycle/failure-path checks, then
+atomically writes `target/p1-local-lab/runtime-proof.json` unless
+`P1_RUNTIME_ARTIFACT` overrides the path. The artifact contains the source
+commit and dirty flag, selected context, host and engine architectures, pinned
+Mongo image, built image IDs, component versions, service health, cross-Core
+results, and reset-isolation results. It must not contain credentials, database
+URIs, or raw environment dumps.
 
 ## Error Handling and Safety
 
@@ -221,7 +259,8 @@ publication remain remote acceptance gates.
   timeout.
 - Never enable Core B by default.
 - Never enable Core B when an Update is `InProgress` or an Action or Procedure
-  has a nonempty enabled schedule.
+  has a nonempty enabled schedule, or when an Action has `run_at_startup`
+  enabled, or while a Stack/Resource Sync is opted into pull-based GitOps.
 - Never use `down -v` from ordinary teardown.
 - Restrict reset to the fixed Compose project and require `--yes`.
 - Bind MongoDB, Core, and Periphery ports to `127.0.0.1` only.
@@ -240,7 +279,7 @@ before the lab exists and then verify:
 - MongoDB 8 pinned by digest rather than FerretDB or a tag-only image;
 - loopback-only host ports;
 - the shared database, network, key volume, and fixed Compose project wrapper;
-- Core B bootstrap restrictions;
+- distinct Core hostnames and Core B bootstrap/startup restrictions;
 - explicit inbound HTTP Periphery mode and authenticated Core-to-Periphery
   readiness through both Core services;
 - external runtime state, explicit env-file selection, local Unix-socket
@@ -278,6 +317,9 @@ rtk env P1_DOCKER_CONTEXT=orbstack \
   scripts/performance/p1-local.sh cross-core-down
 rtk env P1_DOCKER_CONTEXT=orbstack \
   scripts/performance/p1-local.sh down
+rtk env P1_DOCKER_CONTEXT=orbstack \
+  P1_RUNTIME_ARTIFACT=target/p1-local-lab/runtime-proof.json \
+  scripts/performance/verify-p1-local-runtime.sh
 ```
 
 The runtime proof records image IDs, source commit, service health, component
@@ -289,8 +331,9 @@ It does not claim production performance parity.
 - A clean checkout can render the lab configuration without local secrets.
 - With a running Docker engine, one command builds and starts the base stack
   from the current checkout.
-- MongoDB, Core A, and Periphery become healthy within bounded time, and an
-  authenticated Periphery-backed stats request succeeds through Core A.
+- MongoDB, Core A, and Periphery become healthy within bounded time, an
+  authenticated Periphery-backed stats request succeeds through Core A, and an
+  authenticated container listing proves Periphery uses the selected daemon.
 - The embedded UI is reachable from Core A.
 - Core B is absent by default, refuses unsafe startup, and can complete the
   same authenticated Periphery-backed request before being stopped
@@ -300,6 +343,9 @@ It does not claim production performance parity.
 - All host ports are loopback-only and no secret is committed or printed.
 - Runtime secrets and Periphery state remain outside the Docker build context,
   and both AIO ignore files exclude existing ignored development secrets.
+- The final JSON proof artifact is produced from clean final `HEAD`, contains
+  the exact source/runtime provenance, and contains no credential or raw
+  environment value.
 - The documentation distinguishes local regression proof from Linux staging,
   GitHub Actions/GHCR, CDN, and production acceptance.
 
