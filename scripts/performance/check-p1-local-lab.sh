@@ -13,7 +13,8 @@ for path in \
   p1.local.compose.yaml \
   compose/p1.local.env.example \
   bin/core/aio.Dockerfile.dockerignore \
-  bin/periphery/aio.Dockerfile.dockerignore
+  bin/periphery/aio.Dockerfile.dockerignore \
+  scripts/performance/p1-local.sh
 do
   [ -f "$path" ] || fail "missing $path"
 done
@@ -35,6 +36,33 @@ P1_PERIPHERY_PORT=8120'
 
 [ "$(cat compose/p1.local.env.example)" = "$expected_env" ] ||
   fail 'example environment contract mismatch'
+
+[ -x scripts/performance/p1-local.sh ] ||
+  fail 'missing scripts/performance/p1-local.sh'
+grep -Fqx 'project=komodo-p1-local' \
+  scripts/performance/p1-local.sh ||
+  fail 'wrapper project contract mismatch'
+grep -Fq -- '--project-name "$project"' \
+  scripts/performance/p1-local.sh ||
+  fail 'wrapper Compose project argument missing'
+grep -Fq -- '--env-file "$env_file"' \
+  scripts/performance/p1-local.sh ||
+  fail 'wrapper explicit env-file argument missing'
+for command in \
+  doctor config build up wait cross-core-up cross-core-down status down reset
+do
+  grep -Fq "'$command')" scripts/performance/p1-local.sh ||
+    fail "wrapper command missing: $command"
+done
+grep -Fq 'config --services' scripts/performance/p1-local.sh ||
+  fail 'wrapper safe config service listing missing'
+grep -Fq 'config --profiles' scripts/performance/p1-local.sh ||
+  fail 'wrapper safe config profile listing missing'
+if grep -Eq 'config[[:space:]]+--format|config[[:space:]]*>' \
+  scripts/performance/p1-local.sh
+then
+  fail 'wrapper may expose rendered Compose configuration'
+fi
 
 rendered=$(mktemp)
 trap 'rm -f "$rendered"' EXIT HUP INT TERM
@@ -164,6 +192,7 @@ jq -e --arg mongo "$mongo" --arg repo "$repo" '
   (volume_sources("core-a") | index("keys")) != null and
   (volume_sources("core-b") | index("keys")) != null and
   (volume_sources("periphery") | index("keys")) != null and
+  (volume_sources("toolbox") | index("keys")) != null and
   ([.services | to_entries[] |
     select(any(.value.volumes[]?;
       .target == "/var/run/docker.sock")) | .key] == ["periphery"]) and

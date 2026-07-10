@@ -158,6 +158,8 @@ services:
       MONGO_INITDB_ROOT_USERNAME: ${P1_MONGO_ROOT_USERNAME}
       MONGO_INITDB_ROOT_PASSWORD: ${P1_MONGO_ROOT_PASSWORD}
       P1_DATABASE_NAME: ${P1_DATABASE_NAME}
+    volumes:
+      - keys:/config/keys
     networks: [lab]
     depends_on:
       mongo:
