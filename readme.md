@@ -4,6 +4,8 @@ A tool to build and deploy software across many servers.
 
 🦎 [See the docs](https://komo.do)
 
+🦎 [Pull-based GitOps controller](docsite/docs/automate/gitops-controller.md)
+
 🦎 [Try the Demo](https://demo.komo.do) - Login: `demo` : `demo`
 
 🦎 [See the Build Server](https://build.mogh.tech)  - Login: `komodo` : `komodo`

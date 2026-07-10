@@ -83,7 +83,7 @@ async fn get_repo(
 
   let (
     RepoExecutionResponse {
-      mut logs,
+      logs,
       commit_hash,
       commit_message,
       ..
@@ -116,9 +116,26 @@ async fn get_repo(
     });
   }
 
+  Ok(read_prepared_repo_resources(
+    sync,
+    &repo_path,
+    commit_hash,
+    commit_message,
+    logs,
+  ))
+}
+
+/// Reads Resource Sync files from a checkout already prepared by Git.
+pub(crate) fn read_prepared_repo_resources(
+  sync: &ResourceSync,
+  checkout_root: &std::path::Path,
+  hash: Option<String>,
+  message: Option<String>,
+  mut logs: Vec<Log>,
+) -> RemoteResources {
   let (mut files, mut file_errors) = (Vec::new(), Vec::new());
   let resources = super::file::read_resources(
-    &repo_path,
+    checkout_root,
     &sync.config.resource_path,
     &sync.config.match_tags,
     &mut logs,
@@ -126,14 +143,14 @@ async fn get_repo(
     &mut file_errors,
   );
 
-  Ok(RemoteResources {
+  RemoteResources {
     resources,
     files,
     file_errors,
     logs,
-    hash: commit_hash,
-    message: commit_message,
-  })
+    hash,
+    message,
+  }
 }
 
 async fn get_ui_defined(

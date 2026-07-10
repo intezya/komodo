@@ -45,7 +45,7 @@ pub(crate) mod maintenance;
 mod procedure;
 mod repo;
 mod server;
-mod stack;
+pub(crate) mod stack;
 mod swarm;
 mod sync;
 

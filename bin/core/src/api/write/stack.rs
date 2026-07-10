@@ -970,6 +970,8 @@ pub async fn check_stack_for_update_inner(
       ExecuteRequest::DeployStack(DeployStack {
         stack: stack.id.clone(),
         services: deploy_services,
+        remove_orphans: false,
+        validate_before_pre_deploy: false,
         stop_time: None,
       }),
       auto_redeploy_user().to_owned(),

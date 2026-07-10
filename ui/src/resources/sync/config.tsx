@@ -384,6 +384,26 @@ export default function ResourceSyncConfig({
       "": [
         sourceConfig,
         {
+          label: "GitOps",
+          fields: {
+            auto_apply_updates: (value, set) => (
+              <ConfigSwitch
+                label="Auto Apply Git Updates"
+                description={
+                  (update.commit ?? config.commit)
+                    ? "Inactive while a fixed commit is selected."
+                    : "Automatically applies Git Create and Update changes. Deletes remain pending; Git authors can change configuration."
+                }
+                value={value}
+                onCheckedChange={(auto_apply_updates) =>
+                  set({ auto_apply_updates })
+                }
+                disabled={disabled || !!(update.commit ?? config.commit)}
+              />
+            ),
+          },
+        },
+        {
           label: "General",
           fields: {
             resource_path: (values, set) => (

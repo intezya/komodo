@@ -65,9 +65,16 @@ pub(crate) fn deploy_update_success(
 
 #[cfg(test)]
 mod tests {
-  use komodo_client::entities::update::Log;
+  use komodo_client::entities::{
+    FileContents,
+    stack::{StackFileRequires, StackRemoteFileContents},
+    update::Log,
+  };
 
-  use super::deploy_update_success;
+  use super::{
+    DeployIfChangedAction, deploy_update_success,
+    resolve_deploy_if_changed_action,
+  };
 
   fn log(stage: &str, success: bool) -> Log {
     Log {
@@ -100,6 +107,31 @@ mod tests {
       &[log("Compose Up", true), log("Refresh Stack Info", false)]
     ));
   }
+
+  #[test]
+  fn removed_tracked_file_requires_full_deploy() {
+    let action = resolve_deploy_if_changed_action(
+      &[
+        FileContents {
+          path: "compose.yaml".into(),
+          contents: "services: {}".into(),
+        },
+        FileContents {
+          path: "removed.env".into(),
+          contents: "OLD=true".into(),
+        },
+      ],
+      &[StackRemoteFileContents {
+        path: "compose.yaml".into(),
+        contents: "services: {}".into(),
+        services: Vec::new(),
+        requires: StackFileRequires::Redeploy,
+      }],
+      &[],
+    );
+
+    assert!(matches!(action, DeployIfChangedAction::FullDeploy));
+  }
 }
 
 impl super::BatchExecute for BatchDeployStack {
@@ -108,6 +140,8 @@ impl super::BatchExecute for BatchDeployStack {
     ExecuteRequest::DeployStack(DeployStack {
       stack,
       services: Vec::new(),
+      remove_orphans: false,
+      validate_before_pre_deploy: false,
       stop_time: None,
     })
   }
@@ -260,6 +294,9 @@ impl Resolve<ExecuteArgs> for DeployStack {
           .request(ComposeUp {
             stack: stack.clone(),
             services: self.services,
+            remove_orphans: self.remove_orphans,
+            validate_before_pre_deploy: self
+              .validate_before_pre_deploy,
             repo,
             git_token,
             registry_token,
@@ -486,6 +523,8 @@ impl Resolve<ExecuteArgs> for DeployStackIfChanged {
         DeployStack {
           stack: stack.name,
           services: Vec::new(),
+          remove_orphans: false,
+          validate_before_pre_deploy: false,
           stop_time: self.stop_time,
         }
         .resolve(&ExecuteArgs {
@@ -609,10 +648,21 @@ impl Resolve<ExecuteArgs> for DeployStackIfChanged {
     services = format!("{services:?}")
   )
 )]
-async fn deploy_services(
+pub(crate) async fn deploy_services(
   stack: String,
   services: Vec<String>,
   user: &User,
+) -> mogh_error::Result<Update> {
+  deploy_services_with_options(stack, services, user, false, false)
+    .await
+}
+
+pub(crate) async fn deploy_services_with_options(
+  stack: String,
+  services: Vec<String>,
+  user: &User,
+  remove_orphans: bool,
+  validate_before_pre_deploy: bool,
 ) -> mogh_error::Result<Update> {
   // The existing update is initialized to DeployStack,
   // but also has not been created on database.
@@ -620,6 +670,8 @@ async fn deploy_services(
   let req = ExecuteRequest::DeployStack(DeployStack {
     stack,
     services,
+    remove_orphans,
+    validate_before_pre_deploy,
     stop_time: None,
   });
   let update = init_execution_update(&req, user).await?;
@@ -643,7 +695,7 @@ async fn deploy_services(
     services = format!("{services:?}")
   )
 )]
-async fn restart_services(
+pub(crate) async fn restart_services(
   stack: String,
   services: Vec<String>,
   user: &User,
@@ -683,7 +735,7 @@ async fn restart_services(
   skip_all,
   fields(stack = id)
 )]
-async fn update_deployed_contents_with_latest(
+pub(crate) async fn update_deployed_contents_with_latest(
   id: &str,
   contents: Option<Vec<StackRemoteFileContents>>,
   update: &mut Update,
@@ -724,7 +776,7 @@ async fn update_deployed_contents_with_latest(
   }
 }
 
-enum DeployIfChangedAction {
+pub(crate) enum DeployIfChangedAction {
   /// Changes to any compose or env files
   /// always lead to this.
   FullDeploy,
@@ -743,11 +795,19 @@ enum DeployIfChangedAction {
   },
 }
 
-fn resolve_deploy_if_changed_action(
+pub(crate) fn resolve_deploy_if_changed_action(
   deployed_contents: &[FileContents],
   latest_contents: &[StackRemoteFileContents],
   all_services: &[String],
 ) -> DeployIfChangedAction {
+  if deployed_contents.iter().any(|deployed| {
+    !latest_contents
+      .iter()
+      .any(|latest| latest.path == deployed.path)
+  }) {
+    return DeployIfChangedAction::FullDeploy;
+  }
+
   let mut full_restart = false;
   let mut deploy = HashSet::<String>::new();
   let mut restart = HashSet::<String>::new();

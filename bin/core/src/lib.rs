@@ -14,6 +14,7 @@ mod auth;
 mod cloud;
 mod config;
 mod connection;
+mod gitops;
 mod helpers;
 mod monitor;
 mod network;
@@ -63,6 +64,7 @@ pub async fn app() -> anyhow::Result<()> {
 
     // Spawn background tasks
     monitor::spawn_monitoring_loops();
+    gitops::spawn_gitops_controller();
     resource::spawn_resource_refresh_loop();
     resource::spawn_all_resources_cache_refresh_loop();
     resource::spawn_build_state_refresh_loop();

@@ -28,11 +28,67 @@ pub struct SyncDeltas<T: Default> {
   pub to_delete: Vec<String>,
 }
 
+/// Execution policy used internally by manual and pull-based sync paths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SyncExecutionMode {
+  Manual,
+  GitOpsSafe,
+}
+
 impl<T: Default> SyncDeltas<T> {
   pub fn no_changes(&self) -> bool {
     self.to_create.is_empty()
       && self.to_update.is_empty()
       && self.to_delete.is_empty()
+  }
+
+  /// Keeps Delete deltas visible for pending-state calculation while preventing
+  /// automatic reconciliation from applying them.
+  pub(crate) fn apply_execution_mode(
+    &mut self,
+    mode: SyncExecutionMode,
+  ) {
+    if matches!(mode, SyncExecutionMode::GitOpsSafe) {
+      self.to_delete.clear();
+    }
+  }
+}
+
+#[cfg(test)]
+mod gitops_tests {
+  use super::*;
+
+  fn resource_toml(name: &str) -> ResourceToml<()> {
+    ResourceToml {
+      name: name.into(),
+      description: String::new(),
+      template: false,
+      tags: Vec::new(),
+      deploy: false,
+      after: Vec::new(),
+      config: (),
+    }
+  }
+
+  #[test]
+  fn gitops_safe_mode_keeps_create_and_update_but_not_delete() {
+    let mut deltas = SyncDeltas::<()> {
+      to_create: vec![resource_toml("created")],
+      to_update: vec![ToUpdateItem {
+        id: "existing".into(),
+        resource: resource_toml("existing"),
+        update_description: false,
+        update_template: false,
+        update_tags: false,
+      }],
+      to_delete: vec!["removed".into()],
+    };
+
+    deltas.apply_execution_mode(SyncExecutionMode::GitOpsSafe);
+
+    assert_eq!(deltas.to_create.len(), 1);
+    assert_eq!(deltas.to_update.len(), 1);
+    assert!(deltas.to_delete.is_empty());
   }
 }
 

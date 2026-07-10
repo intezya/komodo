@@ -36,6 +36,7 @@ LOG_LEVEL = info
 | `branch` | Branch to clone. | `main` |
 | `auto_update` | Automatically redeploy when newer image digests are available. | `false` |
 | `poll_for_updates` | Check for newer images and show an update indicator. | `false` |
+| `auto_deploy_git_updates` | Reconcile tracked Git file changes while the Stack is running. Independent of image polling. | `false` |
 | `send_alerts` | Send alerts on stack state changes. | `true` |
 | `links` | Quick links displayed in the resource header. | `[]` |
 
@@ -46,6 +47,8 @@ Stacks support three ways to provide compose files:
 1. **Write in the UI** — Komodo writes the files to the host at deploy time.
 2. **Files on the host** — Point to existing files on the server.
 3. **Git repo** — Komodo clones the repo onto the host to deploy. Changes are tracked in git and you can use [webhooks](../automate/webhooks.md) to auto-redeploy on push.
+
+Git-backed Stacks can instead use the opt-in [GitOps controller](../automate/gitops-controller.md). It polls moving branches, only reconciles an already running Stack, and removes orphans only during a full automatic Compose reconciliation.
 
 ## Importing Existing Projects
 

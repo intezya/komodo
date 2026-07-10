@@ -40,6 +40,12 @@ pub struct DeployStack {
   /// Note. For Swarm mode Stacks, this field is not supported and will be ignored.
   #[serde(default)]
   pub services: Vec<String>,
+  /// Remove orphans during a full automatic GitOps reconciliation.
+  #[serde(default)]
+  pub remove_orphans: bool,
+  /// Validate Compose configuration before pre-deploy in automatic GitOps mode.
+  #[serde(default)]
+  pub validate_before_pre_deploy: bool,
   /// Override the default termination max time.
   /// Only used if the stack needs to be taken down first.
   pub stop_time: Option<i32>,
