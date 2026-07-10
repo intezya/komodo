@@ -1,6 +1,6 @@
 # Pull-Based GitOps Controller Design
 
-**Status:** Design approved; written spec awaiting user review  
+**Status:** Approved for implementation planning  
 **Date:** 2026-07-10  
 **Target:** `intezya/komodo` fork only
 
