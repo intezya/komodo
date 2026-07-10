@@ -880,6 +880,26 @@ export default function StackConfig({
             ),
           },
         },
+        {
+          label: "GitOps",
+          fields: {
+            auto_deploy_git_updates: (value, set) => (
+              <ConfigSwitch
+                label="Deploy Git Updates"
+                description={
+                  (update.commit ?? config.commit)
+                    ? "Inactive while a fixed commit is selected."
+                    : "Reconciles Git file changes only while this Stack is running. Image polling is separate."
+                }
+                value={value}
+                onCheckedChange={(auto_deploy_git_updates) =>
+                  set({ auto_deploy_git_updates })
+                }
+                disabled={disabled || !!(update.commit ?? config.commit)}
+              />
+            ),
+          },
+        },
         environment,
         configFiles,
         ...generalCommon,

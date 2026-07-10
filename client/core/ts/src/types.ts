@@ -2101,6 +2101,11 @@ export interface ResourceSyncConfig {
 	 * for the configured git provider.
 	 */
 	git_account?: string;
+	/**
+	 * Whether to automatically apply safe Create and Update changes from Git.
+	 * Resource deletions remain pending for manual review.
+	 */
+	auto_apply_updates?: boolean;
 	/** Whether incoming webhooks actually trigger action. */
 	webhook_enabled: boolean;
 	/**
@@ -2501,6 +2506,11 @@ export interface StackConfig {
 	 * for the configured git provider.
 	 */
 	git_account?: string;
+	/**
+	 * Whether to reconcile tracked Git file changes while this Stack is running.
+	 * This is independent from image digest auto-updates.
+	 */
+	auto_deploy_git_updates?: boolean;
 	/**
 	 * The repo used as the source of the build.
 	 * {namespace}/{repo_name}
@@ -7280,6 +7290,10 @@ export interface DeployStack {
 	 * Note. For Swarm mode Stacks, this field is not supported and will be ignored.
 	 */
 	services?: string[];
+	/** Remove orphans during a full automatic GitOps reconciliation. */
+	remove_orphans?: boolean;
+	/** Validate Compose configuration before pre-deploy in automatic GitOps mode. */
+	validate_before_pre_deploy?: boolean;
 	/**
 	 * Override the default termination max time.
 	 * Only used if the stack needs to be taken down first.
@@ -9622,7 +9636,7 @@ export interface RestartDeployment {
 	deployment: string;
 }
 
-/** Restarts the target stack. `docker compose restart`. Response: [Update] */
+/** Restarts the target stack. `docker compose up --force-recreate`. Response: [Update] */
 export interface RestartStack {
 	/** Id or name */
 	stack: string;

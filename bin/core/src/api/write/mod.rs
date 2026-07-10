@@ -35,6 +35,8 @@ mod service_user;
 mod stack;
 mod swarm;
 mod sync;
+
+pub(crate) use sync::refresh_prepared_resource_sync_pending;
 mod tag;
 mod terminal;
 mod user;

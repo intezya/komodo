@@ -74,6 +74,14 @@ async fn refresh_stacks() {
     return;
   };
   for stack in stacks {
+    if stack.config.auto_deploy_git_updates
+      && !stack.config.files_on_host
+      && stack.config.commit.is_empty()
+      && (!stack.config.repo.is_empty()
+        || !stack.config.linked_repo.is_empty())
+    {
+      continue;
+    }
     RefreshStackCache { stack: stack.id }
       .resolve(
         &WriteArgs { user: stack_user().clone() },
@@ -149,6 +157,14 @@ async fn refresh_syncs() {
     return;
   };
   for sync in syncs {
+    if sync.config.auto_apply_updates
+      && !sync.config.files_on_host
+      && sync.config.commit.is_empty()
+      && (!sync.config.repo.is_empty()
+        || !sync.config.linked_repo.is_empty())
+    {
+      continue;
+    }
     RefreshResourceSyncPending { sync: sync.id }
       .resolve(
         &WriteArgs { user: sync_user().clone() },

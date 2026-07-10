@@ -25,7 +25,7 @@ pub async fn get_repo_compose_contents(
   stack: &Stack,
   repo: Option<&Repo>,
   // Collect any files which are missing in the repo.
-  mut missing_files: Option<&mut Vec<String>>,
+  missing_files: Option<&mut Vec<String>>,
 ) -> anyhow::Result<RemoteComposeContents> {
   let clone_args: RepoExecutionArgs =
     repo.map(Into::into).unwrap_or(stack.into());
@@ -46,7 +46,24 @@ pub async fn get_repo_compose_contents(
     });
   }
 
-  let run_directory = repo_path.join(&stack.config.run_directory);
+  Ok(read_prepared_repo_compose_contents(
+    stack,
+    &repo_path,
+    hash,
+    message,
+    missing_files,
+  ))
+}
+
+/// Reads tracked Stack files from a checkout already prepared by Git.
+pub(crate) fn read_prepared_repo_compose_contents(
+  stack: &Stack,
+  checkout_root: &std::path::Path,
+  hash: Option<String>,
+  message: Option<String>,
+  mut missing_files: Option<&mut Vec<String>>,
+) -> RemoteComposeContents {
+  let run_directory = checkout_root.join(&stack.config.run_directory);
   // This will remove any intermediate '/./' which can be a problem for some OS.
   let run_directory = run_directory.components().collect::<PathBuf>();
 
@@ -77,12 +94,12 @@ pub async fn get_repo_compose_contents(
     }
   }
 
-  Ok(RemoteComposeContents {
+  RemoteComposeContents {
     successful,
     errored,
     hash,
     message,
-  })
+  }
 }
 
 /// Returns (destination, logs, hash, message)

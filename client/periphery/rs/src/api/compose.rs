@@ -173,6 +173,12 @@ pub struct ComposeUp {
   /// If empty, will deploy all services.
   #[serde(default)]
   pub services: Vec<String>,
+  /// Remove services no longer declared by an automatic full reconciliation.
+  #[serde(default)]
+  pub remove_orphans: bool,
+  /// Validate Compose files before pre-deploy during automatic reconciliation.
+  #[serde(default)]
+  pub validate_before_pre_deploy: bool,
   /// The linked repo, if it exists.
   pub repo: Option<Repo>,
   /// If provided, use it to login in. Otherwise check periphery local registries.

@@ -13,6 +13,11 @@ The UI will display the computed sync actions and only execute them upon manual 
 Or the sync execution git webhook may be configured on the git repo to
 automatically execute syncs upon pushes to the configured branch.
 
+For an opt-in pull-based alternative, see the
+[GitOps controller](./gitops-controller.md). It applies Create and Update
+changes from moving Git branches while keeping Delete changes pending for
+manual review.
+
 ## Commit to Syncs
 
 If the Sync is pointing to just a single file, you can enable "Managed Mode" to allow Core to write the updates you made in UI _back to the file_.

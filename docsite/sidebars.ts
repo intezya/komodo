@@ -38,6 +38,7 @@ const sidebars: SidebarsConfig = {
         "automate/procedures",
         "automate/schedules",
         "automate/sync-resources",
+        "automate/gitops-controller",
         "automate/webhooks",
       ],
     },

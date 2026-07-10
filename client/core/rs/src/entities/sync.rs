@@ -237,6 +237,12 @@ pub struct ResourceSyncConfig {
   #[builder(default)]
   pub git_account: String,
 
+  /// Whether to automatically apply safe Create and Update changes from Git.
+  /// Resource deletions remain pending for manual review.
+  #[serde(default)]
+  #[builder(default)]
+  pub auto_apply_updates: bool,
+
   /// Whether incoming webhooks actually trigger action.
   #[serde(default = "default_webhook_enabled")]
   #[builder(default = "default_webhook_enabled()")]
@@ -378,6 +384,7 @@ impl Default for ResourceSyncConfig {
       branch: default_branch(),
       commit: Default::default(),
       git_account: Default::default(),
+      auto_apply_updates: Default::default(),
       resource_path: Default::default(),
       files_on_host: Default::default(),
       file_contents: Default::default(),
@@ -391,6 +398,20 @@ impl Default for ResourceSyncConfig {
       webhook_secret: Default::default(),
       pending_alert: default_pending_alert(),
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn old_resource_sync_config_disables_gitops_auto_apply() {
+    let config: ResourceSyncConfig =
+      serde_json::from_str(r#"{"repo":"example/resources"}"#)
+        .expect("old config should deserialize");
+
+    assert!(!config.auto_apply_updates);
   }
 }
 

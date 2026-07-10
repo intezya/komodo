@@ -43,6 +43,12 @@ use super::ResourceSyncTrait;
 /// with the given reason.
 pub type ToDeployCache = Vec<SyncDeployTarget>;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SyncDeployPolicy {
+  Manual,
+  GitOps,
+}
+
 #[derive(Clone, Copy)]
 pub struct SyncDeployParams<'a> {
   pub deployments: &'a [ResourceToml<PartialDeploymentConfig>],
@@ -112,6 +118,8 @@ pub async fn deploy_from_cache(
               let req = ExecuteRequest::DeployStack(DeployStack {
                 stack: name.to_string(),
                 services: Vec::new(),
+                remove_orphans: false,
+                validate_before_pre_deploy: false,
                 stop_time: None,
               });
 
@@ -219,6 +227,14 @@ type BuildVersionCache = HashMap<String, String>;
 pub async fn build_deploy_cache(
   params: SyncDeployParams<'_>,
 ) -> anyhow::Result<ToDeployCache> {
+  build_deploy_cache_with_policy(params, SyncDeployPolicy::Manual)
+    .await
+}
+
+pub(crate) async fn build_deploy_cache_with_policy(
+  params: SyncDeployParams<'_>,
+  policy: SyncDeployPolicy,
+) -> anyhow::Result<ToDeployCache> {
   let mut cache = ToDeployCacheInner::new();
   let mut build_version_cache = BuildVersionCache::new();
 
@@ -236,6 +252,7 @@ pub async fn build_deploy_cache(
     build_cache_for_stack(
       stack,
       params,
+      policy,
       &mut cache,
       &mut build_version_cache,
     )
@@ -474,6 +491,7 @@ fn build_cache_for_stack<'a>(
     stacks,
     stack_map,
   }: SyncDeployParams<'a>,
+  policy: SyncDeployPolicy,
   cache: &'a mut ToDeployCacheInner,
   build_version_cache: &'a mut BuildVersionCache,
 ) -> BuildRes<'a> {
@@ -485,7 +503,7 @@ fn build_cache_for_stack<'a>(
       return Ok(());
     }
 
-    // Check if stack doesn't have "deploy" enabled.
+    // New Stacks always need explicit deployment authorization.
     if !stack.deploy {
       cache.insert(target, None);
       return Ok(());
@@ -514,6 +532,13 @@ fn build_cache_for_stack<'a>(
       .await
       .curr;
     let state = status.state;
+
+    if policy == SyncDeployPolicy::GitOps
+      && state != StackState::Running
+    {
+      cache.insert(target, None);
+      return Ok(());
+    }
 
     match state {
       StackState::Unknown => {
@@ -730,6 +755,7 @@ async fn insert_target_using_after_list<'a>(
                 stacks,
                 stack_map,
               },
+              SyncDeployPolicy::Manual,
               cache,
               build_version_cache,
             )

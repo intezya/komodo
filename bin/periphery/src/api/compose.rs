@@ -39,6 +39,22 @@ use crate::{
 
 const LOG_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ComposeConfigValidationTiming {
+  BeforePreDeploy,
+  AfterPreDeploy,
+}
+
+fn compose_config_validation_timing(
+  validate_before_pre_deploy: bool,
+) -> ComposeConfigValidationTiming {
+  if validate_before_pre_deploy {
+    ComposeConfigValidationTiming::BeforePreDeploy
+  } else {
+    ComposeConfigValidationTiming::AfterPreDeploy
+  }
+}
+
 impl Resolve<crate::api::Args> for GetComposeLog {
   async fn resolve(
     self,
@@ -445,6 +461,8 @@ impl Resolve<crate::api::Args> for ComposeUp {
       mut stack,
       repo,
       services,
+      remove_orphans,
+      validate_before_pre_deploy,
       git_token,
       registry_token,
       mut replacers,
@@ -495,32 +513,6 @@ impl Resolve<crate::api::Args> for ComposeUp {
       return Ok(res);
     }
 
-    // Pre deploy
-    if !stack.config.pre_deploy.is_none() {
-      let pre_deploy_path =
-        run_directory.join(&stack.config.pre_deploy.path);
-      let span = info_span!("ExecutePreDeploy");
-      if let Some(log) = run_komodo_command_with_sanitization(
-        "Pre Deploy",
-        pre_deploy_path.as_path(),
-        &stack.config.pre_deploy.command,
-        if stack.config.pre_deploy.shell_mode {
-          KomodoCommandMode::Shell
-        } else {
-          KomodoCommandMode::Multiline
-        },
-        &replacers,
-      )
-      .instrument(span)
-      .await
-      {
-        res.logs.push(log);
-        if !all_logs_success(&res.logs) {
-          return Ok(res);
-        }
-      };
-    }
-
     let docker_compose = docker_compose();
 
     let service_args = if services.is_empty() {
@@ -555,88 +547,69 @@ impl Resolve<crate::api::Args> for ComposeUp {
         &stack.config.compose_cmd_wrapper_include
       };
 
-    // Uses 'docker compose config' command to extract services (including image)
-    // after performing interpolation
-    {
-      let command = format!(
-        "{docker_compose} -p {project_name} -f {file_args}{env_file_args} config",
-      );
-      let (command, wrapped) = match maybe_wrap_command(
-        command,
+    let validation_timing =
+      compose_config_validation_timing(validate_before_pre_deploy);
+
+    if validation_timing
+      == ComposeConfigValidationTiming::BeforePreDeploy
+      && !validate_compose_config(
+        &run_directory,
+        &docker_compose,
+        &project_name,
+        &file_args,
+        &env_file_args,
         &compose_cmd_wrapper,
         wrapper_include,
-        "config",
-      ) {
-        Ok(result) => result,
-        Err(log) => {
-          res.logs.push(log);
-          return Ok(res);
-        }
-      };
-      let mode = if wrapped {
-        KomodoCommandMode::Shell
-      } else {
-        KomodoCommandMode::Standard
-      };
-      let span = info_span!("GetComposeConfig", command);
-      let Some(config_log) = run_komodo_command_with_sanitization(
-        "Compose Config",
-        run_directory.as_path(),
-        command,
-        mode,
+        &replacers,
+        &mut res,
+      )
+      .await?
+    {
+      return Ok(res);
+    }
+
+    // Pre deploy
+    if !stack.config.pre_deploy.is_none() {
+      let pre_deploy_path =
+        run_directory.join(&stack.config.pre_deploy.path);
+      let span = info_span!("ExecutePreDeploy");
+      if let Some(log) = run_komodo_command_with_sanitization(
+        "Pre Deploy",
+        pre_deploy_path.as_path(),
+        &stack.config.pre_deploy.command,
+        if stack.config.pre_deploy.shell_mode {
+          KomodoCommandMode::Shell
+        } else {
+          KomodoCommandMode::Multiline
+        },
         &replacers,
       )
       .instrument(span)
       .await
-      else {
-        unreachable!()
-      };
-      if !config_log.success {
-        res.logs.push(config_log);
-        return Ok(res);
-      }
-      let compose =
-        serde_yaml_ng::from_str::<ComposeFile>(&config_log.stdout)
-          .context("Failed to parse compose contents")?;
-      // Store sanitized compose config output
-      res.merged_config = Some(config_log.stdout);
-      for (
-        service_name,
-        ComposeService {
-          container_name,
-          deploy,
-          image,
-        },
-      ) in compose.services
       {
-        let image = image.unwrap_or_default();
-        match deploy {
-          Some(ComposeServiceDeploy {
-            replicas: Some(replicas),
-          }) if replicas > 1 => {
-            for i in 1..1 + replicas {
-              res.services.push(StackServiceNames {
-                container_name: format!(
-                  "{project_name}-{service_name}-{i}"
-                ),
-                service_name: format!("{service_name}-{i}"),
-                image: image.clone(),
-                image_digest: None,
-              });
-            }
-          }
-          _ => {
-            res.services.push(StackServiceNames {
-              container_name: container_name.unwrap_or_else(|| {
-                format!("{project_name}-{service_name}")
-              }),
-              service_name,
-              image,
-              image_digest: None,
-            });
-          }
+        res.logs.push(log);
+        if !all_logs_success(&res.logs) {
+          return Ok(res);
         }
-      }
+      };
+    }
+
+    if validation_timing
+      == ComposeConfigValidationTiming::AfterPreDeploy
+      && !validate_compose_config(
+        &run_directory,
+        &docker_compose,
+        &project_name,
+        &file_args,
+        &env_file_args,
+        &compose_cmd_wrapper,
+        wrapper_include,
+        &replacers,
+        &mut res,
+      )
+      .await?
+    {
+      return Ok(res);
     }
 
     if stack.config.run_build {
@@ -743,6 +716,7 @@ impl Resolve<crate::api::Args> for ComposeUp {
       &extra_args,
       &services,
       false,
+      remove_orphans,
     );
     let (command, _) = match maybe_wrap_command(
       command,
@@ -892,6 +866,7 @@ impl Resolve<crate::api::Args> for ComposeForceRecreate {
       &extra_args,
       &services,
       true,
+      false,
     );
     let (command, _) = match maybe_wrap_command(
       command,
@@ -1189,6 +1164,100 @@ fn env_file_args(
   Ok(res)
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn validate_compose_config(
+  run_directory: &std::path::Path,
+  docker_compose: &str,
+  project_name: &str,
+  file_args: &str,
+  env_file_args: &str,
+  compose_cmd_wrapper: &str,
+  wrapper_include: &[String],
+  replacers: &[(String, String)],
+  res: &mut DeployStackResponse,
+) -> anyhow::Result<bool> {
+  let command = format!(
+    "{docker_compose} -p {project_name} -f {file_args}{env_file_args} config",
+  );
+  let (command, wrapped) = match maybe_wrap_command(
+    command,
+    compose_cmd_wrapper,
+    wrapper_include,
+    "config",
+  ) {
+    Ok(result) => result,
+    Err(log) => {
+      res.logs.push(log);
+      return Ok(false);
+    }
+  };
+  let mode = if wrapped {
+    KomodoCommandMode::Shell
+  } else {
+    KomodoCommandMode::Standard
+  };
+  let span = info_span!("GetComposeConfig", command);
+  let Some(config_log) = run_komodo_command_with_sanitization(
+    "Compose Config",
+    run_directory,
+    command,
+    mode,
+    replacers,
+  )
+  .instrument(span)
+  .await
+  else {
+    unreachable!()
+  };
+  if !config_log.success {
+    res.logs.push(config_log);
+    return Ok(false);
+  }
+  let compose =
+    serde_yaml_ng::from_str::<ComposeFile>(&config_log.stdout)
+      .context("Failed to parse compose contents")?;
+  // Store sanitized compose config output.
+  res.merged_config = Some(config_log.stdout);
+  for (
+    service_name,
+    ComposeService {
+      container_name,
+      deploy,
+      image,
+    },
+  ) in compose.services
+  {
+    let image = image.unwrap_or_default();
+    match deploy {
+      Some(ComposeServiceDeploy {
+        replicas: Some(replicas),
+      }) if replicas > 1 => {
+        for i in 1..1 + replicas {
+          res.services.push(StackServiceNames {
+            container_name: format!(
+              "{project_name}-{service_name}-{i}"
+            ),
+            service_name: format!("{service_name}-{i}"),
+            image: image.clone(),
+            image_digest: None,
+          });
+        }
+      }
+      _ => {
+        res.services.push(StackServiceNames {
+          container_name: container_name.unwrap_or_else(|| {
+            format!("{project_name}-{service_name}")
+          }),
+          service_name,
+          image,
+          image_digest: None,
+        });
+      }
+    }
+  }
+  Ok(true)
+}
+
 fn compose_up_command(
   docker_compose: &str,
   project_name: &str,
@@ -1197,6 +1266,7 @@ fn compose_up_command(
   extra_args: &str,
   services: &[String],
   force_recreate: bool,
+  remove_orphans: bool,
 ) -> String {
   let service_args = if services.is_empty() {
     String::new()
@@ -1208,8 +1278,13 @@ fn compose_up_command(
     (true, false) => " --force-recreate --no-deps",
     (false, _) => "",
   };
+  let orphan_args = if remove_orphans && services.is_empty() {
+    " --remove-orphans"
+  } else {
+    ""
+  };
   format!(
-    "{docker_compose} -p {project_name} -f {file_args}{env_file_args} up -d{extra_args}{recreate_args}{service_args}",
+    "{docker_compose} -p {project_name} -f {file_args}{env_file_args} up -d{extra_args}{recreate_args}{orphan_args}{service_args}",
   )
 }
 
@@ -1295,6 +1370,22 @@ mod tests {
   use super::*;
 
   #[test]
+  fn automatic_reconciliation_validates_before_pre_deploy() {
+    assert_eq!(
+      compose_config_validation_timing(true),
+      ComposeConfigValidationTiming::BeforePreDeploy
+    );
+  }
+
+  #[test]
+  fn manual_deploy_keeps_validation_after_pre_deploy() {
+    assert_eq!(
+      compose_config_validation_timing(false),
+      ComposeConfigValidationTiming::AfterPreDeploy
+    );
+  }
+
+  #[test]
   fn compose_up_command_force_recreates_stack_containers() {
     let command = compose_up_command(
       "docker compose",
@@ -1304,6 +1395,7 @@ mod tests {
       "",
       &[],
       true,
+      false,
     );
 
     assert_eq!(
@@ -1322,11 +1414,31 @@ mod tests {
       "",
       &[String::from("api")],
       true,
+      false,
     );
 
     assert_eq!(
       command,
       "docker compose -p my-stack -f compose.yaml up -d --force-recreate --no-deps api"
+    );
+  }
+
+  #[test]
+  fn compose_up_command_removes_orphans_for_automatic_full_up() {
+    let command = compose_up_command(
+      "docker compose",
+      "my-stack",
+      "compose.yaml",
+      "",
+      "",
+      &[],
+      false,
+      true,
+    );
+
+    assert_eq!(
+      command,
+      "docker compose -p my-stack -f compose.yaml up -d --remove-orphans"
     );
   }
 }

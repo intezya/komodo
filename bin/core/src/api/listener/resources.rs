@@ -262,6 +262,8 @@ impl StackExecution for DeployStack {
       let req = ExecuteRequest::DeployStack(DeployStack {
         stack: stack.id,
         services: Vec::new(),
+        remove_orphans: false,
+        validate_before_pre_deploy: false,
         stop_time: None,
       });
       let update = init_execution_update(&req, &user).await?;

@@ -432,6 +432,12 @@ pub struct StackConfig {
   #[builder(default)]
   pub git_account: String,
 
+  /// Whether to reconcile tracked Git file changes while this Stack is running.
+  /// This is independent from image digest auto-updates.
+  #[serde(default)]
+  #[builder(default)]
+  pub auto_deploy_git_updates: bool,
+
   /// The repo used as the source of the build.
   /// {namespace}/{repo_name}
   #[serde(default)]
@@ -735,12 +741,27 @@ impl Default for StackConfig {
       clone_path: Default::default(),
       reclone: Default::default(),
       git_account: Default::default(),
+      auto_deploy_git_updates: Default::default(),
       webhook_enabled: default_webhook_enabled(),
       webhook_secret: Default::default(),
       webhook_force_deploy: Default::default(),
       send_alerts: default_send_alerts(),
       links: Default::default(),
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn old_stack_config_disables_gitops_auto_deploy() {
+    let config: StackConfig =
+      serde_json::from_str(r#"{"repo":"example/stacks"}"#)
+        .expect("old config should deserialize");
+
+    assert!(!config.auto_deploy_git_updates);
   }
 }
 

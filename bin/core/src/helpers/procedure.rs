@@ -629,6 +629,8 @@ impl ExtendBatch for BatchDeployStack {
     Execution::DeployStack(DeployStack {
       stack,
       services: Vec::new(),
+      remove_orphans: false,
+      validate_before_pre_deploy: false,
       stop_time: None,
     })
   }
