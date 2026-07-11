@@ -199,9 +199,14 @@ pub fn get_stack_state_from_containers(
   }) {
     return StackState::Unhealthy;
   }
-  let running = containers.iter().all(|container| {
+  let is_running = |container: &&ContainerListItem| {
     container.state == ContainerStateStatusEnum::Running
-  });
+      && !container
+        .status
+        .as_deref()
+        .is_some_and(|status| status.contains("(unhealthy)"))
+  };
+  let running = containers.iter().all(is_running);
   if running {
     return StackState::Running;
   }
@@ -224,12 +229,11 @@ pub fn get_stack_state_from_containers(
     return StackState::Restarting;
   }
   let running_with_successful_exits =
-    containers.iter().any(|container| {
-      container.state == ContainerStateStatusEnum::Running
-    }) && containers.iter().all(|container| {
-      container.state == ContainerStateStatusEnum::Running
-        || is_successfully_exited_container(container)
-    });
+    containers.iter().any(is_running)
+      && containers.iter().all(|container| {
+        is_running(container)
+          || is_successfully_exited_container(container)
+      });
   if running_with_successful_exits {
     return StackState::Running;
   }
@@ -963,6 +967,21 @@ mod tests {
       &[web],
       &containers,
     );
+
+    assert_eq!(state, StackState::Unhealthy);
+  }
+
+  #[test]
+  fn stack_state_is_unhealthy_when_replica_healthcheck_fails() {
+    let web = service("web");
+    let containers = vec![container(
+      "web-1",
+      ContainerStateStatusEnum::Running,
+      Some("Up 30 seconds (unhealthy)"),
+    )];
+
+    let state =
+      get_stack_state_from_containers("", &[], &[web], &containers);
 
     assert_eq!(state, StackState::Unhealthy);
   }
