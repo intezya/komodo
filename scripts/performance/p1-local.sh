@@ -334,6 +334,7 @@ if len(set(ports)) != len(ports) or any(p < 1 or p > 65535 for p in ports):
     raise SystemExit("ports must be unique integers from 1 through 65535")
 for port in ports:
     sock = socket.socket()
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         sock.bind(("127.0.0.1", port))
     except OSError:
@@ -466,6 +467,7 @@ import socket
 import sys
 
 sock = socket.socket()
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 try:
     sock.bind(("127.0.0.1", int(sys.argv[1])))
 except OSError:
