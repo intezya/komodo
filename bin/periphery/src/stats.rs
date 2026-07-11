@@ -1,9 +1,12 @@
-use std::{cmp::Ordering, sync::Arc};
+use std::{cmp::Ordering, path::PathBuf, sync::Arc};
 
 use async_timing_util::wait_until_timelength;
-use komodo_client::entities::stats::{
-  SingleDiskUsage, SystemInformation, SystemLoadAverage,
-  SystemProcess, SystemStats,
+use komodo_client::entities::{
+  Timelength as EntityTimelength,
+  stats::{
+    SingleDiskUsage, SystemInformation, SystemLoadAverage,
+    SystemProcess, SystemStats,
+  },
 };
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 
@@ -13,20 +16,33 @@ use crate::{config::periphery_config, state::stats_snapshot};
 /// Keeps the cached stats up to date
 pub fn spawn_polling_thread() {
   tokio::spawn(async move {
-    let polling_rate = periphery_config()
-      .stats_polling_rate
+    let config = periphery_config();
+    let stats_polling_rate = config.stats_polling_rate;
+    let include_disk_mounts =
+      config.include_disk_mounts.iter().cloned().collect();
+    let exclude_disk_mounts =
+      config.exclude_disk_mounts.iter().cloned().collect();
+    let wait_polling_rate = stats_polling_rate
       .to_string()
       .parse()
       .expect("invalid stats polling rate");
     let snapshots = stats_snapshot();
-    let mut collector =
-      tokio::task::spawn_blocking(StatsClient::default)
-        .await
-        .expect("stats collector task panicked");
-    snapshots.store(Arc::new(collector.snapshot()));
+    let (mut collector, snapshot) =
+      tokio::task::spawn_blocking(move || {
+        StatsClient::new(
+          stats_polling_rate,
+          include_disk_mounts,
+          exclude_disk_mounts,
+        )
+        .run_collector_blocking(0)
+      })
+      .await
+      .expect("stats collector task panicked");
+    snapshots.store(Arc::new(snapshot));
 
     loop {
-      let ts = wait_until_timelength(polling_rate, 1).await as i64;
+      let ts =
+        wait_until_timelength(wait_polling_rate, 1).await as i64;
       let (next_collector, snapshot) =
         tokio::task::spawn_blocking(move || {
           collector.run_collector_blocking(ts)
@@ -50,7 +66,7 @@ impl Default for StatsSnapshot {
   fn default() -> Self {
     Self {
       stats: SystemStats {
-        polling_rate: periphery_config().stats_polling_rate,
+        polling_rate: EntityTimelength::FiveSeconds,
         ..Default::default()
       },
       info: Default::default(),
@@ -69,6 +85,8 @@ pub struct StatsClient {
   system: sysinfo::System,
   disks: sysinfo::Disks,
   networks: sysinfo::Networks,
+  include_disk_mounts: Vec<PathBuf>,
+  exclude_disk_mounts: Vec<PathBuf>,
 }
 
 const BYTES_PER_GB: f64 = 1073741824.0;
@@ -77,11 +95,21 @@ const BYTES_PER_KB: f64 = 1024.0;
 
 impl Default for StatsClient {
   fn default() -> Self {
+    Self::new(EntityTimelength::FiveSeconds, Vec::new(), Vec::new())
+  }
+}
+
+impl StatsClient {
+  fn new(
+    polling_rate: EntityTimelength,
+    include_disk_mounts: Vec<PathBuf>,
+    exclude_disk_mounts: Vec<PathBuf>,
+  ) -> Self {
     let system = sysinfo::System::new_all();
     let disks = sysinfo::Disks::new_with_refreshed_list();
     let networks = sysinfo::Networks::new_with_refreshed_list();
     let stats = SystemStats {
-      polling_rate: periphery_config().stats_polling_rate,
+      polling_rate,
       ..Default::default()
     };
     StatsClient {
@@ -90,11 +118,11 @@ impl Default for StatsClient {
       disks,
       networks,
       stats,
+      include_disk_mounts,
+      exclude_disk_mounts,
     }
   }
-}
 
-impl StatsClient {
   fn snapshot(&self) -> StatsSnapshot {
     StatsSnapshot {
       stats: self.stats.clone(),
@@ -160,7 +188,6 @@ impl StatsClient {
   }
 
   fn get_disks(&self) -> Vec<SingleDiskUsage> {
-    let config = periphery_config();
     self
       .disks
       .list()
@@ -170,15 +197,15 @@ impl StatsClient {
           return false;
         }
         let path = d.mount_point();
-        for mount in config.exclude_disk_mounts.iter() {
+        for mount in self.exclude_disk_mounts.iter() {
           if path == mount {
             return false;
           }
         }
-        if config.include_disk_mounts.is_empty() {
+        if self.include_disk_mounts.is_empty() {
           return true;
         }
-        for mount in config.include_disk_mounts.iter() {
+        for mount in self.include_disk_mounts.iter() {
           if path == mount {
             return true;
           }
