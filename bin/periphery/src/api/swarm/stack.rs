@@ -272,11 +272,14 @@ impl Resolve<crate::api::Args> for DeploySwarmStack {
           .context("Failed to parse compose contents")?;
       // Store sanitized stack config output
       res.merged_config = Some(config_log.stdout);
-      for (service_name, ComposeService { image, .. }) in
+      for (service_name, ComposeService { image, deploy, .. }) in
         compose.services
       {
         let image = image.unwrap_or_default();
         res.services.push(StackServiceNames {
+          desired_replicas: deploy
+            .and_then(|deploy| deploy.replicas)
+            .unwrap_or(1),
           container_name: format!("{project_name}-{service_name}"),
           service_name,
           image,

@@ -719,6 +719,18 @@ export default function StackConfig({
       },
     },
     {
+      label: "Rolling Update",
+      hidden: !!currSwarmId,
+      labelHidden: true,
+      fields: {
+        rolling_update: {
+          label: "Rolling Update",
+          description:
+            "Replace Compose service replicas one at a time. Services with container_name or published ports must set the label komodo.rollout=false. Healthy replacements wait for Docker healthchecks; services without a healthcheck must remain running for 10 seconds.",
+        },
+      },
+    },
+    {
       label: "Destroy",
       labelHidden: true,
       fields: {

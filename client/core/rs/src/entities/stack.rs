@@ -27,7 +27,7 @@ use crate::{
 };
 
 use super::{
-  FileContents, SystemCommand,
+  FileContents, I64, SystemCommand,
   docker::container::ContainerListItem,
   resource::{Resource, ResourceListItem, ResourceQuery},
 };
@@ -399,6 +399,13 @@ pub struct StackConfig {
   #[builder(default)]
   pub destroy_before_deploy: bool,
 
+  /// Whether to update Compose services one replica at a time.
+  ///
+  /// Note. Not used in Swarm mode.
+  #[serde(default)]
+  #[builder(default)]
+  pub rolling_update: bool,
+
   /// Whether to skip secret interpolation into the stack environment variables.
   #[serde(default)]
   #[builder(default)]
@@ -728,6 +735,7 @@ impl Default for StackConfig {
       config_files: Default::default(),
       run_build: Default::default(),
       destroy_before_deploy: Default::default(),
+      rolling_update: Default::default(),
       build_extra_args: Default::default(),
       compose_cmd_wrapper: Default::default(),
       compose_cmd_wrapper_include: default_wrapper_include(),
@@ -763,6 +771,47 @@ mod tests {
 
     assert!(!config.auto_deploy_git_updates);
   }
+
+  #[test]
+  fn old_stack_config_disables_rolling_updates() {
+    let config: StackConfig =
+      serde_json::from_str(r#"{"repo":"example/stacks"}"#)
+        .expect("old config should deserialize");
+
+    assert!(!config.rolling_update);
+  }
+
+  #[test]
+  fn stack_config_round_trips_enabled_rolling_updates() {
+    let config: StackConfig =
+      serde_json::from_str(r#"{"rolling_update":true}"#)
+        .expect("rolling update config should deserialize");
+    let serialized = serde_json::to_value(config)
+      .expect("rolling update config should serialize");
+
+    assert_eq!(serialized["rolling_update"], true);
+  }
+
+  #[test]
+  fn old_stack_service_name_defaults_to_one_replica() {
+    let service: StackServiceNames = serde_json::from_str(
+      r#"{"service_name":"web","container_name":"app-web"}"#,
+    )
+    .expect("old service metadata should deserialize");
+
+    assert_eq!(service.desired_replicas, 1);
+  }
+
+  #[test]
+  fn old_stack_service_defaults_replica_runtime_fields() {
+    let service: StackService = serde_json::from_str(
+      r#"{"service":"web","image":"example/web","container":null,"swarm_service":null,"image_digests":null}"#,
+    )
+    .expect("old runtime service should deserialize");
+
+    assert_eq!(service.desired_replicas, 1);
+    assert!(service.containers.is_empty());
+  }
 }
 
 #[cfg(feature = "utoipa")]
@@ -791,11 +840,14 @@ pub struct ComposeProject {
 }
 
 #[typeshare]
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct StackServiceNames {
   /// The name of the service
   pub service_name: String,
+  /// Desired number of containers for this Compose service.
+  #[serde(default = "default_compose_replicas")]
+  pub desired_replicas: I64,
   /// Will either be the declared container_name in the compose file,
   /// or a pattern to match auto named containers.
   ///
@@ -824,16 +876,38 @@ pub struct StackServiceNames {
   pub image_digest: Option<ImageDigest>,
 }
 
+impl Default for StackServiceNames {
+  fn default() -> Self {
+    Self {
+      service_name: String::new(),
+      desired_replicas: default_compose_replicas(),
+      container_name: String::new(),
+      image: String::new(),
+      image_digest: None,
+    }
+  }
+}
+
+fn default_compose_replicas() -> I64 {
+  1
+}
+
 #[typeshare]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct StackService {
   /// The service name
   pub service: String,
+  /// Desired number of containers for this Compose service.
+  #[serde(default = "default_compose_replicas")]
+  pub desired_replicas: I64,
   /// The service image
   pub image: String,
   /// The container (Server mode)
   pub container: Option<ContainerListItem>,
+  /// All containers for this Compose service (Server mode).
+  #[serde(default)]
+  pub containers: Vec<ContainerListItem>,
   /// The service (Swarm mode)
   pub swarm_service: Option<SwarmServiceListItem>,
   /// The service image digests
@@ -913,6 +987,62 @@ pub struct ComposeService {
   pub image: Option<String>,
   pub container_name: Option<String>,
   pub deploy: Option<ComposeServiceDeploy>,
+  #[serde(default)]
+  pub labels: ComposeServiceLabels,
+  #[serde(default)]
+  pub ports: Vec<serde_json::Value>,
+}
+
+impl ComposeService {
+  pub fn desired_replicas(&self) -> i64 {
+    self
+      .deploy
+      .as_ref()
+      .and_then(|deploy| deploy.replicas)
+      .unwrap_or(1)
+  }
+
+  pub fn rollout_policy(&self) -> ComposeRolloutPolicy {
+    ComposeRolloutPolicy {
+      enabled: self.labels.get("komodo.rollout") != Some("false"),
+      pre_stop_hook: self
+        .labels
+        .get("komodo.rollout.pre-stop-hook")
+        .map(str::to_string),
+    }
+  }
+
+  pub fn has_published_ports(&self) -> bool {
+    !self.ports.is_empty()
+  }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ComposeServiceLabels {
+  Map(HashMap<String, String>),
+  List(Vec<String>),
+  #[default]
+  Empty,
+}
+
+impl ComposeServiceLabels {
+  fn get(&self, key: &str) -> Option<&str> {
+    match self {
+      Self::Map(labels) => labels.get(key).map(String::as_str),
+      Self::List(labels) => labels.iter().find_map(|label| {
+        let (label_key, value) = label.split_once('=')?;
+        (label_key == key).then_some(value)
+      }),
+      Self::Empty => None,
+    }
+  }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ComposeRolloutPolicy {
+  pub enabled: bool,
+  pub pre_stop_hook: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

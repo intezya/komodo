@@ -77,7 +77,7 @@ export interface ActionConfig {
 	schedule_format?: ScheduleFormat;
 	/**
 	 * Optionally provide a schedule for the procedure to run on.
-	 * 
+	 *
 	 * There are 2 ways to specify a schedule:
 	 * 
 	 * 1. Regular CRON expression:
@@ -2486,6 +2486,12 @@ export interface StackConfig {
 	auto_update_skip_services?: string[];
 	/** Whether to run `docker compose down` before `compose up`. */
 	destroy_before_deploy?: boolean;
+	/**
+	 * Whether to update Compose services one replica at a time.
+	 *
+	 * Note. Not used in Swarm mode.
+	 */
+	rolling_update?: boolean;
 	/** Whether to skip secret interpolation into the stack environment variables. */
 	skip_secret_interp?: boolean;
 	/** Choose a Komodo Repo (Resource) to source the compose files. */
@@ -2659,6 +2665,8 @@ export interface FileContents {
 export interface StackServiceNames {
 	/** The name of the service */
 	service_name: string;
+	/** Desired number of containers for this Compose service. */
+	desired_replicas: I64;
 	/**
 	 * Will either be the declared container_name in the compose file,
 	 * or a pattern to match auto named containers.
@@ -5413,10 +5421,14 @@ export type ListServersResponse = ServerListItem[];
 export interface StackService {
 	/** The service name */
 	service: string;
+	/** Desired number of containers for this Compose service. */
+	desired_replicas: I64;
 	/** The service image */
 	image: string;
 	/** The container (Server mode) */
 	container?: ContainerListItem;
+	/** All containers for this Compose service (Server mode). */
+	containers?: ContainerListItem[];
 	/** The service (Swarm mode) */
 	swarm_service?: SwarmServiceListItem;
 	/** The service image digests */
@@ -11157,4 +11169,3 @@ export type WsLoginMessage =
 	key: string;
 	secret: string;
 }};
-
