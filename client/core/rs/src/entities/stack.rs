@@ -399,6 +399,13 @@ pub struct StackConfig {
   #[builder(default)]
   pub destroy_before_deploy: bool,
 
+  /// Whether to update Compose services one replica at a time.
+  ///
+  /// Note. Not used in Swarm mode.
+  #[serde(default)]
+  #[builder(default)]
+  pub rolling_update: bool,
+
   /// Whether to skip secret interpolation into the stack environment variables.
   #[serde(default)]
   #[builder(default)]
@@ -728,6 +735,7 @@ impl Default for StackConfig {
       config_files: Default::default(),
       run_build: Default::default(),
       destroy_before_deploy: Default::default(),
+      rolling_update: Default::default(),
       build_extra_args: Default::default(),
       compose_cmd_wrapper: Default::default(),
       compose_cmd_wrapper_include: default_wrapper_include(),
@@ -762,6 +770,26 @@ mod tests {
         .expect("old config should deserialize");
 
     assert!(!config.auto_deploy_git_updates);
+  }
+
+  #[test]
+  fn old_stack_config_disables_rolling_updates() {
+    let config: StackConfig =
+      serde_json::from_str(r#"{"repo":"example/stacks"}"#)
+        .expect("old config should deserialize");
+
+    assert!(!config.rolling_update);
+  }
+
+  #[test]
+  fn stack_config_round_trips_enabled_rolling_updates() {
+    let config: StackConfig =
+      serde_json::from_str(r#"{"rolling_update":true}"#)
+        .expect("rolling update config should deserialize");
+    let serialized = serde_json::to_value(config)
+      .expect("rolling update config should serialize");
+
+    assert_eq!(serialized["rolling_update"], true);
   }
 }
 

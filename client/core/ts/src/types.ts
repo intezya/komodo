@@ -2486,6 +2486,12 @@ export interface StackConfig {
 	auto_update_skip_services?: string[];
 	/** Whether to run `docker compose down` before `compose up`. */
 	destroy_before_deploy?: boolean;
+	/**
+	 * Whether to update Compose services one replica at a time.
+	 * 
+	 * Note. Not used in Swarm mode.
+	 */
+	rolling_update?: boolean;
 	/** Whether to skip secret interpolation into the stack environment variables. */
 	skip_secret_interp?: boolean;
 	/** Choose a Komodo Repo (Resource) to source the compose files. */
