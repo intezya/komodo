@@ -2665,6 +2665,8 @@ export interface FileContents {
 export interface StackServiceNames {
 	/** The name of the service */
 	service_name: string;
+	/** Desired number of containers for this Compose service. */
+	desired_replicas: I64;
 	/**
 	 * Will either be the declared container_name in the compose file,
 	 * or a pattern to match auto named containers.

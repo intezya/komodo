@@ -27,7 +27,7 @@ use crate::{
 };
 
 use super::{
-  FileContents, SystemCommand,
+  FileContents, I64, SystemCommand,
   docker::container::ContainerListItem,
   resource::{Resource, ResourceListItem, ResourceQuery},
 };
@@ -791,6 +791,16 @@ mod tests {
 
     assert_eq!(serialized["rolling_update"], true);
   }
+
+  #[test]
+  fn old_stack_service_name_defaults_to_one_replica() {
+    let service: StackServiceNames = serde_json::from_str(
+      r#"{"service_name":"web","container_name":"app-web"}"#,
+    )
+    .expect("old service metadata should deserialize");
+
+    assert_eq!(service.desired_replicas, 1);
+  }
 }
 
 #[cfg(feature = "utoipa")]
@@ -824,6 +834,9 @@ pub struct ComposeProject {
 pub struct StackServiceNames {
   /// The name of the service
   pub service_name: String,
+  /// Desired number of containers for this Compose service.
+  #[serde(default = "default_compose_replicas")]
+  pub desired_replicas: I64,
   /// Will either be the declared container_name in the compose file,
   /// or a pattern to match auto named containers.
   ///
@@ -850,6 +863,10 @@ pub struct StackServiceNames {
   /// Store the associated image digest.
   /// This includes both the image name / tag, and the specific digest hash.
   pub image_digest: Option<ImageDigest>,
+}
+
+fn default_compose_replicas() -> I64 {
+  1
 }
 
 #[typeshare]
@@ -941,6 +958,62 @@ pub struct ComposeService {
   pub image: Option<String>,
   pub container_name: Option<String>,
   pub deploy: Option<ComposeServiceDeploy>,
+  #[serde(default)]
+  pub labels: ComposeServiceLabels,
+  #[serde(default)]
+  pub ports: Vec<serde_json::Value>,
+}
+
+impl ComposeService {
+  pub fn desired_replicas(&self) -> i64 {
+    self
+      .deploy
+      .as_ref()
+      .and_then(|deploy| deploy.replicas)
+      .unwrap_or(1)
+  }
+
+  pub fn rollout_policy(&self) -> ComposeRolloutPolicy {
+    ComposeRolloutPolicy {
+      enabled: self.labels.get("komodo.rollout") != Some("false"),
+      pre_stop_hook: self
+        .labels
+        .get("komodo.rollout.pre-stop-hook")
+        .map(str::to_string),
+    }
+  }
+
+  pub fn has_published_ports(&self) -> bool {
+    !self.ports.is_empty()
+  }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ComposeServiceLabels {
+  Map(HashMap<String, String>),
+  List(Vec<String>),
+  #[default]
+  Empty,
+}
+
+impl ComposeServiceLabels {
+  fn get(&self, key: &str) -> Option<&str> {
+    match self {
+      Self::Map(labels) => labels.get(key).map(String::as_str),
+      Self::List(labels) => labels.iter().find_map(|label| {
+        let (label_key, value) = label.split_once('=')?;
+        (label_key == key).then_some(value)
+      }),
+      Self::Empty => None,
+    }
+  }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ComposeRolloutPolicy {
+  pub enabled: bool,
+  pub pre_stop_hook: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

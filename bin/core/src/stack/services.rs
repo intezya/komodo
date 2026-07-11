@@ -43,6 +43,7 @@ pub fn extract_services_into_res(
     ComposeService {
       container_name,
       image,
+      deploy,
       ..
     },
   ) in compose.services
@@ -57,8 +58,13 @@ pub fn extract_services_into_res(
       if let Some(image) = image {
         existing.image = image;
       }
+      existing.desired_replicas =
+        deploy.and_then(|deploy| deploy.replicas).unwrap_or(1);
     } else {
       res.push(StackServiceNames {
+        desired_replicas: deploy
+          .and_then(|deploy| deploy.replicas)
+          .unwrap_or(1),
         container_name: container_name.unwrap_or_else(|| {
           format!("{project_name}-{service_name}")
         }),
@@ -72,4 +78,32 @@ pub fn extract_services_into_res(
   }
 
   Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn replicated_compose_service_is_one_logical_service() {
+    let mut services = Vec::new();
+
+    extract_services_into_res(
+      "app",
+      r#"
+services:
+  web:
+    image: example/web:latest
+    deploy:
+      replicas: 3
+"#,
+      &HashMap::new(),
+      &mut services,
+    )
+    .expect("compose services should parse");
+
+    assert_eq!(services.len(), 1);
+    assert_eq!(services[0].service_name, "web");
+    assert_eq!(services[0].desired_replicas, 3);
+  }
 }
