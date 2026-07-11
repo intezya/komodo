@@ -77,7 +77,7 @@ export interface ActionConfig {
 	schedule_format?: ScheduleFormat;
 	/**
 	 * Optionally provide a schedule for the procedure to run on.
-	 * 
+	 *
 	 * There are 2 ways to specify a schedule:
 	 * 
 	 * 1. Regular CRON expression:
@@ -2488,7 +2488,7 @@ export interface StackConfig {
 	destroy_before_deploy?: boolean;
 	/**
 	 * Whether to update Compose services one replica at a time.
-	 * 
+	 *
 	 * Note. Not used in Swarm mode.
 	 */
 	rolling_update?: boolean;
@@ -11169,4 +11169,3 @@ export type WsLoginMessage =
 	key: string;
 	secret: string;
 }};
-
