@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use strum::EnumDiscriminants;
 use uuid::Uuid;
 
-use crate::{config::periphery_config, state::stats_client};
+use crate::{config::periphery_config, state::stats_snapshot};
 
 pub mod terminal;
 
@@ -214,7 +214,7 @@ impl Resolve<Args> for GetSystemProcesses {
     self,
     _: &Args,
   ) -> anyhow::Result<Vec<SystemProcess>> {
-    Ok(stats_client().read().await.get_processes())
+    Ok(stats_snapshot().load().processes.clone())
   }
 }
 

@@ -1,32 +1,78 @@
-use std::cmp::Ordering;
+use std::{cmp::Ordering, path::PathBuf, sync::Arc};
 
 use async_timing_util::wait_until_timelength;
-use komodo_client::entities::stats::{
-  SingleDiskUsage, SystemInformation, SystemLoadAverage,
-  SystemProcess, SystemStats,
+use komodo_client::entities::{
+  Timelength as EntityTimelength,
+  stats::{
+    SingleDiskUsage, SystemInformation, SystemLoadAverage,
+    SystemProcess, SystemStats,
+  },
 };
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 
-use crate::{config::periphery_config, state::stats_client};
+use crate::{config::periphery_config, state::stats_snapshot};
 
 /// This should be called before starting the server in main.rs.
 /// Keeps the cached stats up to date
 pub fn spawn_polling_thread() {
   tokio::spawn(async move {
-    let polling_rate = periphery_config()
-      .stats_polling_rate
+    let config = periphery_config();
+    let stats_polling_rate = config.stats_polling_rate;
+    let include_disk_mounts =
+      config.include_disk_mounts.iter().cloned().collect();
+    let exclude_disk_mounts =
+      config.exclude_disk_mounts.iter().cloned().collect();
+    let wait_polling_rate = stats_polling_rate
       .to_string()
       .parse()
       .expect("invalid stats polling rate");
-    let client = stats_client();
+    let snapshots = stats_snapshot();
+    let (mut collector, snapshot) =
+      tokio::task::spawn_blocking(move || {
+        StatsClient::new(
+          stats_polling_rate,
+          include_disk_mounts,
+          exclude_disk_mounts,
+        )
+        .run_collector_blocking(0)
+      })
+      .await
+      .expect("stats collector task panicked");
+    snapshots.store(Arc::new(snapshot));
+
     loop {
-      let ts = wait_until_timelength(polling_rate, 1).await;
-      let mut client = client.write().await;
-      client.refresh();
-      client.stats = client.get_system_stats();
-      client.stats.refresh_ts = ts as i64;
+      let ts =
+        wait_until_timelength(wait_polling_rate, 1).await as i64;
+      let (next_collector, snapshot) =
+        tokio::task::spawn_blocking(move || {
+          collector.run_collector_blocking(ts)
+        })
+        .await
+        .expect("stats collector task panicked");
+      snapshots.store(Arc::new(snapshot));
+      collector = next_collector;
     }
   });
+}
+
+#[derive(Debug, Clone)]
+pub struct StatsSnapshot {
+  pub stats: SystemStats,
+  pub info: SystemInformation,
+  pub processes: Vec<SystemProcess>,
+}
+
+impl Default for StatsSnapshot {
+  fn default() -> Self {
+    Self {
+      stats: SystemStats {
+        polling_rate: EntityTimelength::FiveSeconds,
+        ..Default::default()
+      },
+      info: Default::default(),
+      processes: Default::default(),
+    }
+  }
 }
 
 pub struct StatsClient {
@@ -39,6 +85,8 @@ pub struct StatsClient {
   system: sysinfo::System,
   disks: sysinfo::Disks,
   networks: sysinfo::Networks,
+  include_disk_mounts: Vec<PathBuf>,
+  exclude_disk_mounts: Vec<PathBuf>,
 }
 
 const BYTES_PER_GB: f64 = 1073741824.0;
@@ -47,11 +95,21 @@ const BYTES_PER_KB: f64 = 1024.0;
 
 impl Default for StatsClient {
   fn default() -> Self {
+    Self::new(EntityTimelength::FiveSeconds, Vec::new(), Vec::new())
+  }
+}
+
+impl StatsClient {
+  fn new(
+    polling_rate: EntityTimelength,
+    include_disk_mounts: Vec<PathBuf>,
+    exclude_disk_mounts: Vec<PathBuf>,
+  ) -> Self {
     let system = sysinfo::System::new_all();
     let disks = sysinfo::Disks::new_with_refreshed_list();
     let networks = sysinfo::Networks::new_with_refreshed_list();
     let stats = SystemStats {
-      polling_rate: periphery_config().stats_polling_rate,
+      polling_rate,
       ..Default::default()
     };
     StatsClient {
@@ -60,11 +118,19 @@ impl Default for StatsClient {
       disks,
       networks,
       stats,
+      include_disk_mounts,
+      exclude_disk_mounts,
     }
   }
-}
 
-impl StatsClient {
+  fn snapshot(&self) -> StatsSnapshot {
+    StatsSnapshot {
+      stats: self.stats.clone(),
+      info: self.info.clone(),
+      processes: self.get_processes(),
+    }
+  }
+
   fn refresh(&mut self) {
     self.system.refresh_cpu_all();
     self.system.refresh_memory();
@@ -75,6 +141,17 @@ impl StatsClient {
     );
     self.disks.refresh(true);
     self.networks.refresh(true);
+  }
+
+  pub fn run_collector_blocking(
+    mut self,
+    refresh_ts: i64,
+  ) -> (Self, StatsSnapshot) {
+    self.refresh();
+    self.stats = self.get_system_stats();
+    self.stats.refresh_ts = refresh_ts;
+    let snapshot = self.snapshot();
+    (self, snapshot)
   }
 
   pub fn get_system_stats(&self) -> SystemStats {
@@ -111,7 +188,6 @@ impl StatsClient {
   }
 
   fn get_disks(&self) -> Vec<SingleDiskUsage> {
-    let config = periphery_config();
     self
       .disks
       .list()
@@ -121,15 +197,15 @@ impl StatsClient {
           return false;
         }
         let path = d.mount_point();
-        for mount in config.exclude_disk_mounts.iter() {
+        for mount in self.exclude_disk_mounts.iter() {
           if path == mount {
             return false;
           }
         }
-        if config.include_disk_mounts.is_empty() {
+        if self.include_disk_mounts.is_empty() {
           return true;
         }
-        for mount in config.include_disk_mounts.iter() {
+        for mount in self.include_disk_mounts.iter() {
           if path == mount {
             return true;
           }
@@ -206,5 +282,27 @@ fn get_system_information(
       .next()
       .map(|cpu| cpu.brand().to_string())
       .unwrap_or_default(),
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::StatsClient;
+
+  #[tokio::test(flavor = "current_thread")]
+  async fn stats_collection_runs_off_runtime_thread() {
+    let runtime_thread = std::thread::current().id();
+
+    let (ran_off_runtime_thread, snapshot) =
+      tokio::task::spawn_blocking(move || {
+        let collector = StatsClient::default();
+        let (_, snapshot) = collector.run_collector_blocking(42);
+        (std::thread::current().id() != runtime_thread, snapshot)
+      })
+      .await
+      .unwrap();
+
+    assert!(ran_off_runtime_thread);
+    assert_eq!(snapshot.stats.refresh_ts, 42);
   }
 }
