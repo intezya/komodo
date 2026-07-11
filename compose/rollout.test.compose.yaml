@@ -1,0 +1,11 @@
+services:
+  web:
+    image: nginx:1.28-alpine
+    pull_policy: never
+    deploy:
+      replicas: 2
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1"]
+      interval: 1s
+      timeout: 1s
+      retries: 10

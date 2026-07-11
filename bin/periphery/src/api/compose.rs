@@ -36,6 +36,8 @@ use crate::{
   },
 };
 
+mod rollout;
+
 const LOG_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -611,6 +613,56 @@ impl Resolve<crate::api::Args> for ComposeUp {
       return Ok(res);
     }
 
+    let resolved_compose = if stack.config.rolling_update {
+      if last_project_name != project_name {
+        res.logs.push(Log::error(
+          "Rolling Update Validation",
+          "rolling_update cannot rename an already deployed Compose project; disable rolling_update for this deploy"
+            .to_string(),
+        ));
+        return Ok(res);
+      }
+      let compose = match res.merged_config.as_deref() {
+        Some(config) => {
+          match serde_yaml_ng::from_str::<ComposeFile>(config) {
+            Ok(compose) => compose,
+            Err(error) => {
+              res.logs.push(Log::error(
+                "Rolling Update Validation",
+                format_serror(
+                  &anyhow!(error)
+                    .context(
+                      "failed to parse resolved Compose config",
+                    )
+                    .into(),
+                ),
+              ));
+              return Ok(res);
+            }
+          }
+        }
+        None => {
+          res.logs.push(Log::error(
+            "Rolling Update Validation",
+            "resolved Compose config is missing".to_string(),
+          ));
+          return Ok(res);
+        }
+      };
+      if let Err(error) =
+        validate_rollout_config(&stack.config, &compose, &services)
+      {
+        res.logs.push(Log::error(
+          "Rolling Update Validation",
+          format_serror(&error.into()),
+        ));
+        return Ok(res);
+      }
+      Some(compose)
+    } else {
+      None
+    };
+
     if stack.config.run_build {
       let build_extra_args =
         format_extra_args(&stack.config.build_extra_args);
@@ -705,46 +757,154 @@ impl Resolve<crate::api::Args> for ComposeUp {
         .context("Failed to take down existing compose stack")?;
     }
 
-    // Run compose up
     let extra_args = format_extra_args(&stack.config.extra_args);
-    let command = compose_up_command(
-      &docker_compose,
-      &project_name,
-      &file_args,
-      &env_file_args,
-      &extra_args,
-      &services,
-      false,
-      remove_orphans,
-    );
-    let (command, _) = match maybe_wrap_command(
-      command,
-      &compose_cmd_wrapper,
-      wrapper_include,
-      "up",
-    ) {
-      Ok(result) => result,
-      Err(log) => {
-        res.logs.push(log);
-        return Ok(res);
+    if let Some(compose) = resolved_compose {
+      let mut service_names = if services.is_empty() {
+        compose.services.keys().cloned().collect::<Vec<_>>()
+      } else {
+        services.clone()
+      };
+      service_names.sort();
+      for service_name in service_names {
+        let Some(service) = compose.services.get(&service_name)
+        else {
+          res.logs.push(Log::error(
+            "Rolling Update Validation",
+            format!("service '{service_name}' is not defined"),
+          ));
+          return Ok(res);
+        };
+        let desired_replicas = match usize::try_from(
+          service.desired_replicas(),
+        ) {
+          Ok(replicas) => replicas,
+          Err(error) => {
+            res.logs.push(Log::error(
+              "Rolling Update Validation",
+              format!(
+                "service '{service_name}' has invalid replicas: {error}"
+              ),
+            ));
+            return Ok(res);
+          }
+        };
+        let escaped_service = escape(Cow::Borrowed(&service_name));
+        let base = format!(
+          "{docker_compose} -p {project_name} -f {file_args}{env_file_args}"
+        );
+        let start_command = format!(
+          "{base} up -d{extra_args} --no-deps --scale {escaped_service}={desired_replicas} {escaped_service}"
+        );
+        let (start_command, _) = match maybe_wrap_command(
+          start_command,
+          &compose_cmd_wrapper,
+          wrapper_include,
+          "up",
+        ) {
+          Ok(result) => result,
+          Err(log) => {
+            res.logs.push(log);
+            return Ok(res);
+          }
+        };
+
+        let policy = service.rollout_policy();
+        if policy.enabled {
+          let scale_command = format!(
+            "{base} up -d{extra_args} --no-deps --no-recreate --scale {escaped_service}={} {escaped_service}",
+            desired_replicas.saturating_add(1)
+          );
+          let (scale_command, _) = match maybe_wrap_command(
+            scale_command,
+            &compose_cmd_wrapper,
+            wrapper_include,
+            "up",
+          ) {
+            Ok(result) => result,
+            Err(log) => {
+              res.logs.push(log);
+              return Ok(res);
+            }
+          };
+          if let Err(error) = rollout::rollout_service(
+            rollout::RolloutServiceArgs {
+              run_directory: run_directory.as_path(),
+              start_command,
+              scale_command,
+              project_name: &project_name,
+              service_name: &service_name,
+              desired_replicas,
+              pre_stop_hook: policy.pre_stop_hook.as_deref(),
+              replacers: &replacers,
+            },
+            &mut res.logs,
+          )
+          .await
+          {
+            res.logs.push(Log::error(
+              "Compose Rolling Update",
+              format_serror(&error.into()),
+            ));
+            return Ok(res);
+          }
+        } else {
+          let Some(log) = run_komodo_command_with_sanitization(
+            "Compose Up",
+            run_directory.as_path(),
+            start_command,
+            KomodoCommandMode::Shell,
+            &replacers,
+          )
+          .await
+          else {
+            unreachable!()
+          };
+          let success = log.success;
+          res.logs.push(log);
+          if !success {
+            return Ok(res);
+          }
+        }
       }
-    };
+    } else {
+      let command = compose_up_command(
+        &docker_compose,
+        &project_name,
+        &file_args,
+        &env_file_args,
+        &extra_args,
+        &services,
+        false,
+        remove_orphans,
+      );
+      let (command, _) = match maybe_wrap_command(
+        command,
+        &compose_cmd_wrapper,
+        wrapper_include,
+        "up",
+      ) {
+        Ok(result) => result,
+        Err(log) => {
+          res.logs.push(log);
+          return Ok(res);
+        }
+      };
 
-    let span = info_span!("ExecuteComposeUp");
-    let Some(log) = run_komodo_command_with_sanitization(
-      "Compose Up",
-      run_directory.as_path(),
-      command,
-      KomodoCommandMode::Shell,
-      &replacers,
-    )
-    .instrument(span)
-    .await
-    else {
-      unreachable!()
-    };
-
-    res.logs.push(log);
+      let span = info_span!("ExecuteComposeUp");
+      let Some(log) = run_komodo_command_with_sanitization(
+        "Compose Up",
+        run_directory.as_path(),
+        command,
+        KomodoCommandMode::Shell,
+        &replacers,
+      )
+      .instrument(span)
+      .await
+      else {
+        unreachable!()
+      };
+      res.logs.push(log);
+    }
     res.deployed = deploy_succeeded_from_logs(&res.logs);
 
     if res.deployed && !stack.config.post_deploy.is_none() {
@@ -1176,6 +1336,16 @@ fn validate_rollout_config(
       "rolling_update cannot be combined with destroy_before_deploy"
     ));
   }
+  if let Some(argument) = config.extra_args.iter().find(|argument| {
+    matches!(
+      argument.as_str(),
+      "--force-recreate" | "--always-recreate-deps" | "--scale"
+    ) || argument.starts_with("--scale=")
+  }) {
+    return Err(anyhow!(
+      "rolling_update cannot be combined with extra argument '{argument}'"
+    ));
+  }
 
   for (service_name, service) in &compose.services {
     if (!services.is_empty() && !services.contains(service_name))
@@ -1597,5 +1767,18 @@ services:
 
     validate_rollout_config(&config, &compose, &[])
       .expect("opted-out service should use normal compose up");
+  }
+
+  #[test]
+  fn rolling_validation_rejects_conflicting_extra_args() {
+    let mut config = StackConfig::default();
+    config.rolling_update = true;
+    config.extra_args = vec!["--force-recreate".to_string()];
+
+    let error =
+      validate_rollout_config(&config, &ComposeFile::default(), &[])
+        .expect_err("force recreate must conflict with rollout");
+
+    assert!(error.to_string().contains("--force-recreate"));
   }
 }
