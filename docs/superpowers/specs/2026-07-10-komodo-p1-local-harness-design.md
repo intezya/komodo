@@ -183,7 +183,10 @@ Create `scripts/performance/p1-local.sh` with these commands:
   services.
 - `build`: build Core and Periphery from the current checkout.
 - `up`: initialize the ignored environment if needed, start the base services,
-  and wait for health.
+  and wait for health. It starts MongoDB and Core A first, reads Core A's
+  public key through the authenticated API, writes only that public key into
+  the shared keys volume through the one-shot toolbox, and then starts
+  Periphery. This avoids relying on host access to a daemon-managed volume.
 - `wait`: prove MongoDB, Core A `GET /version`, and Periphery HTTP
   `GET /version` readiness with bounded retries. Then authenticate to Core A
   with the generated local admin and make one Periphery-backed stats request
@@ -198,11 +201,14 @@ Create `scripts/performance/p1-local.sh` with these commands:
   through it, and make the same
   Periphery-backed stats request. Unpause Core A on success and on every error.
 - `cross-core-down`: stop and remove only Core B while preserving the base
-  stack and all volumes.
+  stack and all volumes, then wait within a bounded deadline for its loopback
+  port to be released.
 - `status`: show Compose service and health state without exposing secrets.
-- `down`: stop containers and networks while preserving volumes.
+- `down`: stop containers and networks while preserving volumes, then wait
+  within a bounded deadline for all lab ports to be released.
 - `reset --yes`: remove only the `komodo-p1-local` containers, networks, and
-  volumes. Refuse without the explicit flag.
+  volumes, then wait within a bounded deadline for all lab ports to be
+  released. Refuse without the explicit flag.
 
 Users invoke the wrapper through `rtk`, but the checked-in script itself calls
 the underlying tools directly, matching existing repository scripts.
@@ -249,6 +255,13 @@ commit and dirty flag, selected context, host and engine architectures, pinned
 Mongo image, built image IDs, component versions, service health, cross-Core
 results, and reset-isolation results. It must not contain credentials, database
 URIs, or raw environment dumps.
+
+The verifier requires an empty fixed Compose project at entry and never resets
+pre-existing lab state implicitly. A successful run deliberately exercises
+and resets only `komodo-p1-local`, while preserving the external environment
+and state directory. The accepted final proof must be regenerated after the
+documentation commit so `git_sha` names clean final `HEAD` and `git_dirty` is
+false.
 
 ## Error Handling and Safety
 
