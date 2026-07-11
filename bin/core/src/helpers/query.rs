@@ -125,7 +125,39 @@ pub async fn get_deployment_state(
 }
 
 /// Can pass all the containers from the same server
+pub fn container_matches_compose_service(
+  project_name: &str,
+  service: &StackServiceNames,
+  container: &ContainerListItem,
+) -> bool {
+  let label_match = container
+    .labels
+    .get("com.docker.compose.project")
+    .zip(container.labels.get("com.docker.compose.service"))
+    .map(|(project, name)| {
+      project == project_name && name == &service.service_name
+    });
+  if let Some(label_match) = label_match {
+    return label_match;
+  }
+  match compose_container_match_regex(&service.container_name)
+    .with_context(|| {
+      format!(
+        "failed to construct container name matching regex for service {}",
+        service.service_name
+      )
+    }) {
+    Ok(regex) => regex.is_match(&container.name),
+    Err(e) => {
+      warn!("{e:#}");
+      false
+    }
+  }
+}
+
+/// Can pass all the containers from the same server
 pub fn get_stack_state_from_containers(
+  project_name: &str,
   ignore_services: &[String],
   services: &[StackServiceNames],
   containers: &[ContainerListItem],
@@ -137,23 +169,34 @@ pub fn get_stack_state_from_containers(
       !ignore_services.contains(&service.service_name)
     })
     .collect::<Vec<_>>();
-  let containers = containers.iter().filter(|container| {
-    services.iter().any(|StackServiceNames { service_name, container_name, .. }| {
-      match compose_container_match_regex(container_name)
-        .with_context(|| format!("failed to construct container name matching regex for service {service_name}")) 
-      {
-        Ok(regex) => regex,
-        Err(e) => {
-          warn!("{e:#}");
-          return false
-        }
-      }.is_match(&container.name)
+  let containers = containers
+    .iter()
+    .filter(|container| {
+      services.iter().any(|service| {
+        container_matches_compose_service(
+          project_name,
+          service,
+          container,
+        )
+      })
     })
-  }).collect::<Vec<_>>();
+    .collect::<Vec<_>>();
   if containers.is_empty() {
     return StackState::Down;
   }
-  if services.len() > containers.len() {
+  if services.iter().any(|service| {
+    containers
+      .iter()
+      .filter(|container| {
+        container_matches_compose_service(
+          project_name,
+          service,
+          container,
+        )
+      })
+      .count()
+      != usize::try_from(service.desired_replicas).unwrap_or_default()
+  }) {
     return StackState::Unhealthy;
   }
   let running = containers.iter().all(|container| {
@@ -683,6 +726,24 @@ mod tests {
     }
   }
 
+  fn compose_container(
+    name: &str,
+    project: &str,
+    service: &str,
+  ) -> ContainerListItem {
+    let mut container =
+      container(name, ContainerStateStatusEnum::Running, None);
+    container.labels.insert(
+      "com.docker.compose.project".to_string(),
+      project.to_string(),
+    );
+    container.labels.insert(
+      "com.docker.compose.service".to_string(),
+      service.to_string(),
+    );
+    container
+  }
+
   #[test]
   fn stack_state_is_running_when_all_services_are_running() {
     let services = vec![service("app"), service("worker")];
@@ -691,8 +752,12 @@ mod tests {
       container("worker-1", ContainerStateStatusEnum::Running, None),
     ];
 
-    let state =
-      get_stack_state_from_containers(&[], &services, &containers);
+    let state = get_stack_state_from_containers(
+      "",
+      &[],
+      &services,
+      &containers,
+    );
 
     assert_eq!(state, StackState::Running);
   }
@@ -713,8 +778,12 @@ mod tests {
       ),
     ];
 
-    let state =
-      get_stack_state_from_containers(&[], &services, &containers);
+    let state = get_stack_state_from_containers(
+      "",
+      &[],
+      &services,
+      &containers,
+    );
 
     assert_eq!(state, StackState::Stopped);
   }
@@ -731,8 +800,12 @@ mod tests {
       ),
     ];
 
-    let state =
-      get_stack_state_from_containers(&[], &services, &containers);
+    let state = get_stack_state_from_containers(
+      "",
+      &[],
+      &services,
+      &containers,
+    );
 
     assert_eq!(state, StackState::Running);
   }
@@ -749,8 +822,12 @@ mod tests {
       ),
     ];
 
-    let state =
-      get_stack_state_from_containers(&[], &services, &containers);
+    let state = get_stack_state_from_containers(
+      "",
+      &[],
+      &services,
+      &containers,
+    );
 
     assert_eq!(state, StackState::Unhealthy);
   }
@@ -767,8 +844,12 @@ mod tests {
       ),
     ];
 
-    let state =
-      get_stack_state_from_containers(&[], &services, &containers);
+    let state = get_stack_state_from_containers(
+      "",
+      &[],
+      &services,
+      &containers,
+    );
 
     assert_eq!(state, StackState::Unhealthy);
   }
@@ -781,8 +862,12 @@ mod tests {
       container("migrate-1", ContainerStateStatusEnum::Exited, None),
     ];
 
-    let state =
-      get_stack_state_from_containers(&[], &services, &containers);
+    let state = get_stack_state_from_containers(
+      "",
+      &[],
+      &services,
+      &containers,
+    );
 
     assert_eq!(state, StackState::Unhealthy);
   }
@@ -799,8 +884,12 @@ mod tests {
       ),
     ];
 
-    let state =
-      get_stack_state_from_containers(&[], &services, &containers);
+    let state = get_stack_state_from_containers(
+      "",
+      &[],
+      &services,
+      &containers,
+    );
 
     assert_eq!(state, StackState::Unhealthy);
   }
@@ -814,8 +903,66 @@ mod tests {
       None,
     )];
 
-    let state =
-      get_stack_state_from_containers(&[], &services, &containers);
+    let state = get_stack_state_from_containers(
+      "",
+      &[],
+      &services,
+      &containers,
+    );
+
+    assert_eq!(state, StackState::Unhealthy);
+  }
+
+  #[test]
+  fn stack_state_is_running_when_all_replicas_are_running() {
+    let mut web = service("web");
+    web.desired_replicas = 2;
+    let containers = vec![
+      compose_container("generated-a", "app", "web"),
+      compose_container("generated-b", "app", "web"),
+    ];
+
+    let state = get_stack_state_from_containers(
+      "app",
+      &[],
+      &[web],
+      &containers,
+    );
+
+    assert_eq!(state, StackState::Running);
+  }
+
+  #[test]
+  fn stack_state_is_unhealthy_when_replica_is_missing() {
+    let mut web = service("web");
+    web.desired_replicas = 2;
+    let containers =
+      vec![compose_container("generated-a", "app", "web")];
+
+    let state = get_stack_state_from_containers(
+      "app",
+      &[],
+      &[web],
+      &containers,
+    );
+
+    assert_eq!(state, StackState::Unhealthy);
+  }
+
+  #[test]
+  fn stack_state_is_unhealthy_when_extra_replica_exists() {
+    let web = service("web");
+    let containers = vec![
+      compose_container("generated-a", "app", "web"),
+      compose_container("generated-b", "app", "web"),
+    ];
+
+    let state = get_stack_state_from_containers(
+      "app",
+      &[],
+      &[web],
+      &containers,
+    );
 
     assert_eq!(state, StackState::Unhealthy);
   }

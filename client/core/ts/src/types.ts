@@ -5421,10 +5421,14 @@ export type ListServersResponse = ServerListItem[];
 export interface StackService {
 	/** The service name */
 	service: string;
+	/** Desired number of containers for this Compose service. */
+	desired_replicas: I64;
 	/** The service image */
 	image: string;
 	/** The container (Server mode) */
 	container?: ContainerListItem;
+	/** All containers for this Compose service (Server mode). */
+	containers?: ContainerListItem[];
 	/** The service (Swarm mode) */
 	swarm_service?: SwarmServiceListItem;
 	/** The service image digests */

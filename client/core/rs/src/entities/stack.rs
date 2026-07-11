@@ -801,6 +801,17 @@ mod tests {
 
     assert_eq!(service.desired_replicas, 1);
   }
+
+  #[test]
+  fn old_stack_service_defaults_replica_runtime_fields() {
+    let service: StackService = serde_json::from_str(
+      r#"{"service":"web","image":"example/web","container":null,"swarm_service":null,"image_digests":null}"#,
+    )
+    .expect("old runtime service should deserialize");
+
+    assert_eq!(service.desired_replicas, 1);
+    assert!(service.containers.is_empty());
+  }
 }
 
 #[cfg(feature = "utoipa")]
@@ -829,7 +840,7 @@ pub struct ComposeProject {
 }
 
 #[typeshare]
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct StackServiceNames {
   /// The name of the service
@@ -865,6 +876,18 @@ pub struct StackServiceNames {
   pub image_digest: Option<ImageDigest>,
 }
 
+impl Default for StackServiceNames {
+  fn default() -> Self {
+    Self {
+      service_name: String::new(),
+      desired_replicas: default_compose_replicas(),
+      container_name: String::new(),
+      image: String::new(),
+      image_digest: None,
+    }
+  }
+}
+
 fn default_compose_replicas() -> I64 {
   1
 }
@@ -875,10 +898,16 @@ fn default_compose_replicas() -> I64 {
 pub struct StackService {
   /// The service name
   pub service: String,
+  /// Desired number of containers for this Compose service.
+  #[serde(default = "default_compose_replicas")]
+  pub desired_replicas: I64,
   /// The service image
   pub image: String,
   /// The container (Server mode)
   pub container: Option<ContainerListItem>,
+  /// All containers for this Compose service (Server mode).
+  #[serde(default)]
+  pub containers: Vec<ContainerListItem>,
   /// The service (Swarm mode)
   pub swarm_service: Option<SwarmServiceListItem>,
   /// The service image digests
