@@ -142,6 +142,19 @@ function StackServicesServer({
           ),
         },
         {
+          id: "replicas",
+          size: 120,
+          header: "Replicas",
+          cell: ({ row }) => {
+            const actual = row.original.containers?.length
+              ? row.original.containers.length
+              : row.original.container
+                ? 1
+                : 0;
+            return `${actual} / ${row.original.desired_replicas}`;
+          },
+        },
+        {
           accessorKey: "container.state",
           size: 160,
           header: ({ column }) => (
