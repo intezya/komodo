@@ -1,4 +1,4 @@
-use std::cmp::Ordering;
+use std::{cmp::Ordering, sync::Arc};
 
 use async_timing_util::wait_until_timelength;
 use komodo_client::entities::stats::{
@@ -7,7 +7,7 @@ use komodo_client::entities::stats::{
 };
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 
-use crate::{config::periphery_config, state::stats_client};
+use crate::{config::periphery_config, state::stats_snapshot};
 
 /// This should be called before starting the server in main.rs.
 /// Keeps the cached stats up to date
@@ -18,15 +18,45 @@ pub fn spawn_polling_thread() {
       .to_string()
       .parse()
       .expect("invalid stats polling rate");
-    let client = stats_client();
+    let snapshots = stats_snapshot();
+    let mut collector =
+      tokio::task::spawn_blocking(StatsClient::default)
+        .await
+        .expect("stats collector task panicked");
+    snapshots.store(Arc::new(collector.snapshot()));
+
     loop {
-      let ts = wait_until_timelength(polling_rate, 1).await;
-      let mut client = client.write().await;
-      client.refresh();
-      client.stats = client.get_system_stats();
-      client.stats.refresh_ts = ts as i64;
+      let ts = wait_until_timelength(polling_rate, 1).await as i64;
+      let (next_collector, snapshot) =
+        tokio::task::spawn_blocking(move || {
+          collector.run_collector_blocking(ts)
+        })
+        .await
+        .expect("stats collector task panicked");
+      snapshots.store(Arc::new(snapshot));
+      collector = next_collector;
     }
   });
+}
+
+#[derive(Debug, Clone)]
+pub struct StatsSnapshot {
+  pub stats: SystemStats,
+  pub info: SystemInformation,
+  pub processes: Vec<SystemProcess>,
+}
+
+impl Default for StatsSnapshot {
+  fn default() -> Self {
+    Self {
+      stats: SystemStats {
+        polling_rate: periphery_config().stats_polling_rate,
+        ..Default::default()
+      },
+      info: Default::default(),
+      processes: Default::default(),
+    }
+  }
 }
 
 pub struct StatsClient {
@@ -65,6 +95,14 @@ impl Default for StatsClient {
 }
 
 impl StatsClient {
+  fn snapshot(&self) -> StatsSnapshot {
+    StatsSnapshot {
+      stats: self.stats.clone(),
+      info: self.info.clone(),
+      processes: self.get_processes(),
+    }
+  }
+
   fn refresh(&mut self) {
     self.system.refresh_cpu_all();
     self.system.refresh_memory();
@@ -75,6 +113,17 @@ impl StatsClient {
     );
     self.disks.refresh(true);
     self.networks.refresh(true);
+  }
+
+  pub fn run_collector_blocking(
+    mut self,
+    refresh_ts: i64,
+  ) -> (Self, StatsSnapshot) {
+    self.refresh();
+    self.stats = self.get_system_stats();
+    self.stats.refresh_ts = refresh_ts;
+    let snapshot = self.snapshot();
+    (self, snapshot)
   }
 
   pub fn get_system_stats(&self) -> SystemStats {
@@ -206,5 +255,27 @@ fn get_system_information(
       .next()
       .map(|cpu| cpu.brand().to_string())
       .unwrap_or_default(),
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::StatsClient;
+
+  #[tokio::test(flavor = "current_thread")]
+  async fn stats_collection_runs_off_runtime_thread() {
+    let runtime_thread = std::thread::current().id();
+
+    let (ran_off_runtime_thread, snapshot) =
+      tokio::task::spawn_blocking(move || {
+        let collector = StatsClient::default();
+        let (_, snapshot) = collector.run_collector_blocking(42);
+        (std::thread::current().id() != runtime_thread, snapshot)
+      })
+      .await
+      .unwrap();
+
+    assert!(ran_off_runtime_thread);
+    assert_eq!(snapshot.stats.refresh_ts, 42);
   }
 }

@@ -9,7 +9,7 @@ use crate::{
   config::periphery_config,
   docker::{DockerClient, compose::list_compose_projects},
   state::{
-    docker_client, host_public_ip, periphery_keys, stats_client,
+    docker_client, host_public_ip, periphery_keys, stats_snapshot,
   },
 };
 
@@ -18,12 +18,12 @@ impl Resolve<crate::api::Args> for PollStatus {
     self,
     _: &crate::api::Args,
   ) -> anyhow::Result<PollStatusResponse> {
-    let stats_client = stats_client().read().await;
-
-    let system_stats = if self.include_stats {
-      Some(stats_client.stats.clone())
-    } else {
-      None
+    let (system_info, system_stats) = {
+      let snapshot = stats_snapshot().load();
+      (
+        snapshot.info.clone(),
+        self.include_stats.then(|| snapshot.stats.clone()),
+      )
     };
 
     let docker = if self.include_docker {
@@ -39,7 +39,7 @@ impl Resolve<crate::api::Args> for PollStatus {
 
     Ok(PollStatusResponse {
       periphery_info: periphery_information().await,
-      system_info: stats_client.info.clone(),
+      system_info,
       system_stats,
       docker,
     })

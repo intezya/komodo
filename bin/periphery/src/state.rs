@@ -12,14 +12,14 @@ use komodo_client::entities::{
 use mogh_cache::{CloneCache, CloneVecCache};
 use mogh_pki::{PkiKind, RotatableKeyPair, SpkiPublicKey};
 use periphery_client::transport::EncodedTransportMessage;
-use tokio::sync::{Mutex, OnceCell, RwLock, mpsc, oneshot};
+use tokio::sync::{Mutex, OnceCell, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use transport::channel::BufferedChannel;
 use uuid::Uuid;
 
 use crate::{
   config::periphery_config, docker::DockerClient,
-  helpers::resolve_host_public_ip, stats::StatsClient,
+  helpers::resolve_host_public_ip, stats::StatsSnapshot,
   terminal::PeripheryTerminal,
 };
 
@@ -168,10 +168,10 @@ pub fn core_connections() -> &'static CoreConnections {
   CORE_CONNECTIONS.get_or_init(Default::default)
 }
 
-pub fn stats_client() -> &'static RwLock<StatsClient> {
-  static STATS_CLIENT: OnceLock<RwLock<StatsClient>> =
+pub fn stats_snapshot() -> &'static ArcSwap<StatsSnapshot> {
+  static STATS_SNAPSHOT: OnceLock<ArcSwap<StatsSnapshot>> =
     OnceLock::new();
-  STATS_CLIENT.get_or_init(|| RwLock::new(StatsClient::default()))
+  STATS_SNAPSHOT.get_or_init(Default::default)
 }
 
 pub fn terminals() -> &'static CloneVecCache<Arc<PeripheryTerminal>> {
