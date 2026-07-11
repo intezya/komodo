@@ -1,0 +1,166 @@
+networks:
+  lab: {}
+
+volumes:
+  mongo-data: {}
+  mongo-config: {}
+  keys: {}
+
+services:
+  mongo:
+    image: mongo:8.0.26@sha256:ffa440e8d62533e24a67696ae1bbb46e610ebb3167d65abd122b496ae06d28e6
+    restart: unless-stopped
+    labels:
+      komodo.skip: "true"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${P1_MONGO_ROOT_USERNAME}
+      MONGO_INITDB_ROOT_PASSWORD: ${P1_MONGO_ROOT_PASSWORD}
+    ports:
+      - "127.0.0.1:${P1_MONGO_PORT:-27017}:27017"
+    volumes:
+      - mongo-data:/data/db
+      - mongo-config:/data/configdb
+    networks: [lab]
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --username \"$$MONGO_INITDB_ROOT_USERNAME\" --password \"$$MONGO_INITDB_ROOT_PASSWORD\" --authenticationDatabase admin --eval 'db.adminCommand({ ping: 1 }).ok' | grep 1"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+  core-a:
+    build:
+      context: .
+      dockerfile: bin/core/aio.Dockerfile
+    image: komodo-p1-local-core:dev
+    init: true
+    restart: unless-stopped
+    environment:
+      KOMODO_HOST: http://127.0.0.1:${P1_CORE_A_PORT:-9120}
+      KOMODO_PORT: 9120
+      KOMODO_BIND_IP: 0.0.0.0
+      KOMODO_DATABASE_ADDRESS: mongo:27017
+      KOMODO_DATABASE_USERNAME: ${P1_MONGO_ROOT_USERNAME}
+      KOMODO_DATABASE_PASSWORD: ${P1_MONGO_ROOT_PASSWORD}
+      KOMODO_DATABASE_DB_NAME: ${P1_DATABASE_NAME}
+      KOMODO_DATABASE_APP_NAME: komodo_p1_core_a
+      KOMODO_PRIVATE_KEY: file:/config/keys/core.key
+      KOMODO_FIRST_SERVER_NAME: ${P1_FIRST_SERVER_NAME}
+      KOMODO_FIRST_SERVER_ADDRESS: http://periphery:8120
+      KOMODO_LOCAL_AUTH: "true"
+      KOMODO_DISABLE_USER_REGISTRATION: "true"
+      KOMODO_DISABLE_INIT_RESOURCES: "true"
+      KOMODO_INIT_ADMIN_USERNAME: ${P1_INIT_ADMIN_USERNAME}
+      KOMODO_INIT_ADMIN_PASSWORD: ${P1_INIT_ADMIN_PASSWORD}
+      KOMODO_JWT_SECRET: ${P1_JWT_SECRET}
+      KOMODO_WEBHOOK_SECRET: ${P1_WEBHOOK_SECRET}
+      KOMODO_MONITORING_INTERVAL: 15-sec
+      KOMODO_RESOURCE_POLL_INTERVAL: 1-day
+    ports:
+      - "127.0.0.1:${P1_CORE_A_PORT:-9120}:9120"
+    volumes:
+      - keys:/config/keys
+    networks: [lab]
+    depends_on:
+      mongo:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail http://127.0.0.1:9120/version"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+  periphery:
+    build:
+      context: .
+      dockerfile: bin/periphery/aio.Dockerfile
+    image: komodo-p1-local-periphery:dev
+    init: true
+    restart: unless-stopped
+    environment:
+      PERIPHERY_SERVER_ENABLED: "true"
+      PERIPHERY_PORT: 8120
+      PERIPHERY_BIND_IP: 0.0.0.0
+      PERIPHERY_SSL_ENABLED: "false"
+      PERIPHERY_PRIVATE_KEY: file:/config/keys/periphery.key
+      PERIPHERY_CORE_PUBLIC_KEYS: file:/config/keys/core.pub
+      PERIPHERY_ROOT_DIRECTORY: ${P1_PERIPHERY_ROOT}
+      PERIPHERY_INCLUDE_DISK_MOUNTS: /etc/hostname
+    ports:
+      - "127.0.0.1:${P1_PERIPHERY_PORT:-8120}:8120"
+    volumes:
+      - keys:/config/keys
+      - ${P1_DOCKER_SOCKET}:/var/run/docker.sock
+      - /proc:/proc:ro
+      - ${P1_PERIPHERY_ROOT}:${P1_PERIPHERY_ROOT}
+    networks: [lab]
+    depends_on:
+      core-a:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail http://127.0.0.1:8120/version"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+
+  core-b:
+    profiles: [cross-core]
+    build:
+      context: .
+      dockerfile: bin/core/aio.Dockerfile
+    image: komodo-p1-local-core:dev
+    init: true
+    restart: "no"
+    environment:
+      KOMODO_HOST: http://localhost:${P1_CORE_B_PORT:-9121}
+      KOMODO_PORT: 9120
+      KOMODO_BIND_IP: 0.0.0.0
+      KOMODO_DATABASE_ADDRESS: mongo:27017
+      KOMODO_DATABASE_USERNAME: ${P1_MONGO_ROOT_USERNAME}
+      KOMODO_DATABASE_PASSWORD: ${P1_MONGO_ROOT_PASSWORD}
+      KOMODO_DATABASE_DB_NAME: ${P1_DATABASE_NAME}
+      KOMODO_DATABASE_APP_NAME: komodo_p1_core_b
+      KOMODO_PRIVATE_KEY: file:/config/keys/core.key
+      KOMODO_LOCAL_AUTH: "true"
+      KOMODO_DISABLE_USER_REGISTRATION: "true"
+      KOMODO_DISABLE_INIT_RESOURCES: "true"
+      KOMODO_JWT_SECRET: ${P1_JWT_SECRET}
+      KOMODO_WEBHOOK_SECRET: ${P1_WEBHOOK_SECRET}
+      KOMODO_MONITORING_INTERVAL: 15-sec
+      KOMODO_RESOURCE_POLL_INTERVAL: 1-day
+    ports:
+      - "127.0.0.1:${P1_CORE_B_PORT:-9121}:9120"
+    volumes:
+      - keys:/config/keys
+    networks: [lab]
+    depends_on:
+      mongo:
+        condition: service_healthy
+      core-a:
+        condition: service_healthy
+      periphery:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail http://127.0.0.1:9120/version"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+  toolbox:
+    profiles: [tools]
+    image: mongo:8.0.26@sha256:ffa440e8d62533e24a67696ae1bbb46e610ebb3167d65abd122b496ae06d28e6
+    restart: "no"
+    command: [sleep, infinity]
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${P1_MONGO_ROOT_USERNAME}
+      MONGO_INITDB_ROOT_PASSWORD: ${P1_MONGO_ROOT_PASSWORD}
+      P1_DATABASE_NAME: ${P1_DATABASE_NAME}
+    volumes:
+      - keys:/config/keys
+    networks: [lab]
+    depends_on:
+      mongo:
+        condition: service_healthy
